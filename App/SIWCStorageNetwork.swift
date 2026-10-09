@@ -62,10 +62,14 @@ struct SIWCHTTPError: Error {
         startedAt = ProcessInfo.processInfo.systemUptime
         diagnostics = ["operation": operation, "phase": "request-started"]
     }
+    private func elapsed() -> Int { Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000) }
     private func finishDiagnostic() {
         diagnostics["elapsedMilliseconds"] = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
     }
     func recordFailure(_ error: Error) {
+        let ns = error as NSError
+        diagnostics["errorDomainClass"] = [NSCocoaErrorDomain, NSURLErrorDomain].contains(ns.domain) ? ns.domain : "application"
+        diagnostics["errorNumericCode"] = ns.code
         diagnostics["failureStage"] = diagnostics["phase"]
         diagnostics["phase"] = "stopped"
         if let http = error as? SIWCHTTPError {
@@ -117,6 +121,7 @@ struct SIWCHTTPError: Error {
         var request = try makeRequest(url: SIWCProtocol.resource + "/responses", body: body, bearer: bearer)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let (bytes, response) = try await session.bytes(for: request)
+        diagnostics["headersMilliseconds"] = elapsed()
         guard let http = response as? HTTPURLResponse else { throw SIWCError.invalidResponse }
         diagnostics["httpStatus"] = http.statusCode
         guard (200..<300).contains(http.statusCode) else {
@@ -128,19 +133,38 @@ struct SIWCHTTPError: Error {
         let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased()
         let mime = contentType?.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) }
         diagnostics["contentTypeClass"] = ["text/event-stream", "application/json", "text/plain"].contains(mime ?? "") ? mime : mime == nil ? "missing" : "other"
-        guard mime == "text/event-stream" else { throw SIWCError.unexpectedContentType }
+        guard SIWCStream.acceptsContentType(contentType) else {
+            var sample = Data()
+            for try await byte in bytes {
+                if sample.isEmpty { diagnostics["firstDataMilliseconds"] = elapsed() }
+                sample.append(byte); if sample.count >= 16384 { break }
+            }
+            let root = (try? JSONSerialization.jsonObject(with: sample)) as? [String: Any]
+            diagnostics["nonStreamBodyShape"] = root?["error"] != nil ? "error-object" : root?["detail"] != nil ? "detail-object" : root?["output"] != nil ? "response-object" : root != nil ? "other-object" : "non-object"
+            diagnostics["nonStreamLooksLikeSSE"] = sample.starts(with: Data("data:".utf8)) || sample.starts(with: Data("event:".utf8))
+            if let error = root?["error"] as? [String: Any] { diagnostics["errorCode"] = SIWCSafeDiagnostic.code(error["code"] as? String) }
+            throw SIWCError.unexpectedContentType
+        }
         diagnostics["phase"] = "stream-open"
         var stream = SIWCStream()
         do {
             for try await byte in bytes {
+                if diagnostics["firstDataMilliseconds"] == nil { diagnostics["firstDataMilliseconds"] = elapsed() }
                 try Task.checkCancellation(); try stream.byte(byte)
                 if stream.completed { break }
             }
             let text = try stream.finish()
             diagnostics["terminalEvent"] = stream.terminal
+            diagnostics["terminalMilliseconds"] = elapsed()
             diagnostics["phase"] = "completed"
             return text
-        } catch { diagnostics["terminalEvent"] = stream.terminal; throw error }
+        } catch {
+            diagnostics["terminalEvent"] = stream.terminal
+            diagnostics["eventCount"] = stream.eventCount
+            diagnostics["lastEventShape"] = stream.lastEventShape
+            if stream.terminal != nil { diagnostics["terminalMilliseconds"] = elapsed() }
+            throw error
+        }
     }
     private func makeRequest(url: String, body: Data?, bearer: String?, form: Bool = false) throws -> URLRequest {
         guard let endpoint = URL(string: url), endpoint.scheme == "https", endpoint.user == nil, endpoint.password == nil,

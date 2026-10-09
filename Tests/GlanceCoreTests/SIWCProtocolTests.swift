@@ -150,3 +150,15 @@ private struct SigningFixture {
         for byte: UInt8 in [0xff, 10] { try utf8.byte(byte) }
     }
 }
+
+@Test func missingContentTypeStillRequiresValidCompletedSSE() throws {
+    #expect(SIWCStream.acceptsContentType(nil))
+    #expect(SIWCStream.acceptsContentType("text/event-stream; charset=utf-8"))
+    #expect(!SIWCStream.acceptsContentType("application/json"))
+    var parser = SIWCStream()
+    for byte in (#"data: {"type":"response.output_text.delta","delta":"red square; GLANCE 123"}"# + "\n\n" + #"data: {"type":"response.completed"}"# + "\n\n").utf8 { try parser.byte(byte) }
+    #expect(try parser.finish() == "red square; GLANCE 123")
+    var json = SIWCStream()
+    for byte in #"{"status":"completed"}"#.utf8 { try json.byte(byte) }
+    #expect(throws: SIWCError.incompleteStream) { try json.finish() }
+}

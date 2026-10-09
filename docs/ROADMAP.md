@@ -2,7 +2,7 @@
 
 ## Gate 0 — official authentication feasibility (not passed)
 
-Before a complete app is built, verify an official Sign in with ChatGPT route on a physical iPhone. The current official flow specifies the system browser, PKCE, and an HTTP loopback callback on 127.0.0.1. The system authentication window and loopback callback worked on the tested physical iPhone; official sign-in and the authenticated model catalog have now passed. Image inference and session lifecycle acceptance remain pending. Do not assume custom URL scheme support.
+Before a complete app is built, verify an official Sign in with ChatGPT route on a physical iPhone. The current official flow specifies the system browser, PKCE, and an HTTP loopback callback on 127.0.0.1. The system authentication window and loopback callback worked on the tested physical iPhone; official sign-in and the authenticated model catalog have now passed. A synthetic-image request using gpt-6-luna/none now completed with correct shape and text recognition; cold-start session restoration passed. Natural refresh and revocation acceptance remain pending. Do not assume custom URL scheme support.
 
 References reviewed 2026-10-09:
 - [Sign-in flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
@@ -10,7 +10,7 @@ References reviewed 2026-10-09:
 - [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Cookbook introduction](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
 
-Real authorization must be initiated explicitly by the user. Any future implementation needs verified state and ID tokens, scoped account records, secure local credential storage, official refresh behavior, and revocation handling. Never reuse another app's credentials. List models for the authenticated account before choosing one; The tested catalog includes gpt-6-luna; reasoning.effort=none with image input still requires a successful request.
+Real authorization must be initiated explicitly by the user. Any future implementation needs verified state and ID tokens, scoped account records, secure local credential storage, official refresh behavior, and revocation handling. Never reuse another app's credentials. List models for the authenticated account before choosing one; The tested catalog includes gpt-6-luna; reasoning.effort=none with image input completed successfully on the tested account.
 
 Acceptance requires a real-device callback, validated permissions and identity, account-specific model availability, one still-image request, and session renewal. No paid API fallback or remote relay is planned.
 

@@ -148,9 +148,17 @@ public struct SIWCStreamFailure: Error, Sendable {
     public let parameter: String?
 }
 public struct SIWCStream {
+    /// Observed official direct route can omit Content-Type. Validate the actual
+    /// SSE body and completed event; a missing header alone is not a failure.
+    public static func acceptsContentType(_ header: String?) -> Bool {
+        guard let header else { return true }
+        return header.lowercased().split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) } == "text/event-stream"
+    }
     public private(set) var text = ""
     public private(set) var completed = false
     public private(set) var terminal: String?
+    public private(set) var eventCount = 0
+    public private(set) var lastEventShape: [String: Bool] = [:]
     private var eventData: [String] = []
     private var eventSize = 0
     private var lineBytes: [UInt8] = []
@@ -179,9 +187,13 @@ public struct SIWCStream {
             let payload = eventData.joined(separator: "\n"); eventData = []; eventSize = 0
             if payload == "[DONE]" { return }
             guard let data = payload.data(using: .utf8) else { throw SIWCError.sseInvalidUTF8 }
+            eventCount += 1
             let object: Any
             do { object = try JSONSerialization.jsonObject(with: data) }
             catch { throw SIWCError.sseInvalidJSON }
+            if let value = object as? [String: Any] {
+                lastEventShape = ["hasTypeString": value["type"] is String, "hasResponse": value["response"] != nil, "hasObject": value["object"] != nil, "hasError": value["error"] != nil, "hasDelta": value["delta"] != nil]
+            }
             guard let event = object as? [String: Any], let type = event["type"] as? String else { throw SIWCError.sseMissingType }
             if ["response.failed", "error", "response.incomplete"].contains(type) {
                 terminal = type

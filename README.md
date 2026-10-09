@@ -2,7 +2,7 @@
 
 An early, open-source iPhone experiment for recognizing objects, visible text, and barcode values from a single image after the center of the camera view is stable.
 
-**Current state: mock camera UI plus an optional official SIWC validation screen.** Physical-device Sign in with ChatGPT completed, including callback, ID-token verification and device-only Keychain storage. The authenticated catalog returned seven visible models and included `gpt-6-luna`. A controlled synthetic-image request returned HTTP 200 but stopped during local response validation/decoding without a confirmed terminal event. Session restoration passed; natural refresh and revocation remain untested; full Gate 0 has not passed. The default mock has no camera or network activity. See [Phase B evidence](docs/PHASE_B.md) and the earlier [account-free callback probes](docs/PHASE_A.md).
+**Current state: mock camera UI plus a verified native ChatGPT sign-in and synthetic-image path.** On the tested physical iPhone, official sign-in, identity/permission checks, device-only Keychain storage, cold-start session restoration and the authenticated model catalog passed. `gpt-6-luna` with `reasoning.effort=none` returned `response.completed` in about 2.58 seconds and correctly read a generated red square and “GLANCE 123”. Natural token refresh and revocation remain untested, so the full lifecycle gate is still open. No real camera is implemented. See [Phase B evidence](docs/PHASE_B.md) and [account-free callback probes](docs/PHASE_A.md).
 
 ## Run the mock
 
@@ -21,7 +21,7 @@ xcodebuild -project Glance.xcodeproj -scheme Glance -sdk iphonesimulator \
   CODE_SIGNING_ALLOWED=NO build
 ```
 
-The six recognition-state tests cover stability, deduplication, stale responses, returning targets, target removal, independent reverse sides, silent empty results, cache eviction, and foreground reset. Two additional tests cover synthetic callback validation and replay rejection. Eight further SIWC protocol tests cover PKCE, callbacks, signed identity validation, request construction and stream completion (16 total tests). Core tests run on the host; simulator launch does not verify a real camera or authentication.
+The six recognition-state tests cover stability, deduplication, stale responses, returning targets, target removal, independent reverse sides, silent empty results, cache eviction, and foreground reset. Two additional tests cover synthetic callback validation and replay rejection. Nine further SIWC protocol tests cover PKCE, callbacks, signed identity validation, request construction and stream completion (17 total tests). Core tests run on the host; simulator launch does not verify a real camera or authentication.
 
 ## Scope and privacy
 

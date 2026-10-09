@@ -1,14 +1,28 @@
 # B 正式 SIWC 最小驗證
 
-2026-10-09。使用者在知悉持續權限與本機Keychain保留後，已親自完成正式授權。實體iPhone上的官方回呼、token交換、JWKS簽章與claims／scope校驗、Keychain保存，以及帳戶模型目錄均通過。單張合成圖片與會話生命週期尚未完成全部驗收；G0仍未整體通過。相機未實作。
+2026-10-09。使用者在知悉持續權限與本機Keychain保留後，已親自完成正式授權。實體iPhone上的官方回呼、token交換、JWKS簽章與claims／scope校驗、Keychain保存，以及帳戶模型目錄均通過。同一會話的gpt-6-luna/none合成圖片已成功；冷啟動保留會話通過。自然續期與正式撤銷仍未實測，完整生命週期關卡尚未完成；相機未實作。
 
-## 實際證據與限制
+## 最新結果（先讀本節）
 
-- Glance自己的非敏感狀態先為`awaiting-user-in-official-window`且未登入，再為`authenticated-plan-enabled`。後者僅在官方token交換、簽章／claims驗證與Keychain寫入成功後產生，不是A2 mock。
-- 帳戶模型請求回報`catalog-loaded`，可見模型數7；使用者看到gpt-6-luna。清單成功不證明該模型的影像輸入或none參數已可用。
-- 最新受控圖測試已stopped，HTTP200後驗證／解碼失敗；冷啟動恢復已通過，詳見末節。自然到期refresh與正式撤銷未實測，不重登或撤銷現有會話。
-- 16項host測試通過；最新實機簽名建置通過。已登入提示及用量說明修正已安裝，既有會話恢復成功；更細診斷修正不增加推論請求。
-- 本機確認勾選由Glance自行加入，不是官方要求，也不會更改官方計費設定。官方文件指向Usage頁管理app方案與credits；已查SIWC文件未提供讀取該開關的公開API。只保留驗證結論，帳戶設定截圖、餘額與私人識別不入公開檔案。
+2026-10-09 11:26:47 UTC，官方圖片請求HTTP200，收到response.completed；headers與first-data均1366ms，terminal與總耗時2580ms。仍使用先前會話，沒有重新OAuth。目錄7個可見模型且含gpt-6-luna，實際body使用reasoning.effort=none、store:false、stream:true與程式生成PNG。
+
+合成圖輸出：A solid red square appears in the upper-left area. Below it, the readable text is “GLANCE 123” in large black letters.
+
+紅色、方形及文字檢查皆通過。此結果只驗證合成圖片模型路徑，不證明live相機、實際商品或條碼。
+
+### 已確認根因與修正
+
+- 離線確認Foundation.lines會略過SSE空行，已改逐byte解析並覆蓋LF／CRLF／CR、Unicode與終止事件。
+- 細診斷實測官方回應沒有Content-Type，HTTP200且首段是SSE。此前App的強制標頭檢查在response-headers階段拒絕回應；headers1432ms、first-data1433ms。這是該次受控失敗的確定原因，不能倒推所有更早嘗試的唯一根因。
+- 對缺標頭容許進入嚴格SSE解析，仍拒絕不相容的明示類型、無效事件、失敗／未完成及沒有response.completed的回應。修正後用同一模型與方案成功，未改付費方式。
+
+### 已完成與未完成
+
+17項離線測試及最新實機build通過，新版已安裝；UI改「ChatGPT 登入驗證」，已有會話顯示已登入，不再要求Continue。冷啟動自身狀態ready且authenticated/restoredSessionAtLaunch均true，無自動請求；模型目錄於需要時重新讀取。
+
+安全診斷包含階段、HTTP、安全分類、header／first-data／terminal時間；此明確啟用的合成fixture可保存4096 bytes內的純文字答案供驗證，一般回應、帳戶、token／header、圖片base64不保存。沒有API可由本機勾選直接更改官方credits設定；既有官方點數停用核對仍有效，未改帳戶設定。
+
+自然refresh與正式撤銷尚未實測，未把編譯或程式碼存在当成驗收。後面保留診斷歷史；其中stopped／尚未完成描述是當時狀態，以上成功結果取代圖片關卡的受阻結論。
 
 ## 官方規格（本輪重新讀取）
 
@@ -38,7 +52,7 @@ scope：openid、profile、email（身份）；offline_access（重啟後續期�
 
 ## 本輪驗收範圍
 
-16項host測試涵蓋原辨識狀態、合成回呼、PKCE向量、state/client/replay/到期拒絕、JWT簽章及claims、scope、模型與Responses欄位、SSE必須完成。編譯和mock不代表相機驗收。
+17項host測試涵蓋原辨識狀態、合成回呼、PKCE向量、state/client/replay/到期拒絕、JWT簽章及claims、scope、模型與Responses欄位、SSE必須完成。編譯和mock不代表相機驗收。
 
 已實測正式登入、Keychain寫入與模型目錄；圖片推論、冷啟動恢復、自然到期refresh與正式撤銷分別記錄，不因前項成功推定後項。使用者已授權在首次停止後安裝修正版和一次受控重試，結果見末節。正式登入成功後不應再次點Continue；新介面以「已登入ChatGPT」表示保存會話。
 
@@ -61,4 +75,4 @@ scope：openid、profile、email（身份）；offline_access（重啟後續期�
 
 安全報告只記階段、HTTP狀態、允許清單內的錯誤碼／參數、耗時、終止事件及合成fixture符合與否。不寫token、帳號、Authorization、base64圖片、模型原始文字或一般回應。正式續期與撤銷未實測，相機未實作。
 
-最後冷啟動核對：2026-10-09 11:21:04 UTC，ready、authenticated=true、planEnabled=true、planOnlyConfirmed=true、restoredSessionAtLaunch=true，request為空。未帶自動登入／推論旗標；目錄數0是新程序尚未重新查詢，不能解讀成模型被撤回。新版已安裝，未額外送圖。16項離線測試及最新實機build通過。
+最後冷啟動核對：2026-10-09 11:21:04 UTC，ready、authenticated=true、planEnabled=true、planOnlyConfirmed=true、restoredSessionAtLaunch=true，request為空。未帶自動登入／推論旗標；目錄數0是新程序尚未重新查詢，不能解讀成模型被撤回。新版已安裝，未額外送圖。17項離線測試及最新實機build通過。

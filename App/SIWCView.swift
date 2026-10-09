@@ -246,7 +246,12 @@ import Observation
     private func report(_ phase: String) {
         // Opt-in test diagnostics: no URL, code, token, email, subject, response text or model list.
         guard ProcessInfo.processInfo.arguments.contains("--siwc-diagnostics") else { return }
-        let value: [String: Any] = ["restoredSessionAtLaunch": restoredSession, "syntheticFixtureChecks": fixtureChecks, "request": SIWCHTTP.shared.diagnostics, "phase": phase, "authenticated": authenticated, "planEnabled": planEnabled, "availableModelCount": catalog.count, "planOnlyConfirmed": planOnlyConfirmed, "candidateListed": catalog.contains { $0.slug == "gpt-6-luna" }, "recordedAt": ISO8601DateFormatter().string(from: Date())]
+        var value: [String: Any] = ["restoredSessionAtLaunch": restoredSession, "syntheticFixtureChecks": fixtureChecks, "request": SIWCHTTP.shared.diagnostics, "phase": phase, "authenticated": authenticated, "planEnabled": planEnabled, "availableModelCount": catalog.count, "planOnlyConfirmed": planOnlyConfirmed, "candidateListed": catalog.contains { $0.slug == "gpt-6-luna" }, "recordedAt": ISO8601DateFormatter().string(from: Date())]
+        // Only this explicit synthetic-fixture diagnostic can persist its short plain-text answer.
+        // Ordinary responses, images, envelopes and account data are never written.
+        if phase == "synthetic-image-completed", ProcessInfo.processInfo.arguments.contains("--siwc-test-once"), output.utf8.count <= 4096 {
+            value["syntheticText"] = output
+        }
         if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
             try? data.write(to: root.appendingPathComponent("siwc-status.json"), options: .atomic)
         }
@@ -300,7 +305,7 @@ struct SIWCView: View {
                     }
                     Button("登出並撤銷可續期會話", role: .destructive) { model.signOut() }.disabled(model.busy)
                 }
-            }.navigationTitle("正式 SIWC 驗證")
+            }.navigationTitle("ChatGPT 登入驗證")
                 .task {
                     guard !loaded else { return }; loaded = true; model.load()
                     if ProcessInfo.processInfo.arguments.contains("--siwc-start") { model.begin() }
