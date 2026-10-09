@@ -1,0 +1,21 @@
+// !$*UTF8*$!
+{archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
+000000000000000000000001 = {isa = PBXProject; buildConfigurationList = 00000000000000000000000D; compatibilityVersion = "Xcode 14.0"; mainGroup = 000000000000000000000002; productRefGroup = 000000000000000000000003; projectDirPath = ""; targets = (000000000000000000000004,);};
+000000000000000000000002 = {isa = PBXGroup; children = (000000000000000000000006,000000000000000000000007,000000000000000000000003,); sourceTree = "<group>";};
+000000000000000000000003 = {isa = PBXGroup; children = (000000000000000000000005,); name = Products; sourceTree = "<group>";};
+000000000000000000000005 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = Glance.app; sourceTree = BUILT_PRODUCTS_DIR;};
+000000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/GlanceApp.swift"; sourceTree = "<group>";};
+000000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/GlanceCore/RecognitionState.swift"; sourceTree = "<group>";};
+000000000000000000000008 = {isa = PBXBuildFile; fileRef = 000000000000000000000006;};
+000000000000000000000009 = {isa = PBXBuildFile; fileRef = 000000000000000000000007;};
+00000000000000000000000A = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000008,000000000000000000000009,); runOnlyForDeploymentPostprocessing = 0;};
+00000000000000000000000B = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+00000000000000000000000C = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+000000000000000000000004 = {isa = PBXNativeTarget; buildConfigurationList = 00000000000000000000000E; buildPhases = (00000000000000000000000A,00000000000000000000000B,00000000000000000000000C,); buildRules = (); dependencies = (); name = Glance; productName = Glance; productReference = 000000000000000000000005; productType = "com.apple.product-type.application";};
+00000000000000000000000F = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SWIFT_VERSION = 6.0; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; name = Debug;};
+000000000000000000000010 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SWIFT_VERSION = 6.0;}; name = Release;};
+000000000000000000000011 = {isa = XCBuildConfiguration; buildSettings = {PRODUCT_BUNDLE_IDENTIFIER = local.peiyu.Glance; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_UILaunchScreen_Generation = YES; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; CODE_SIGN_STYLE = Automatic;}; name = Debug;};
+000000000000000000000012 = {isa = XCBuildConfiguration; buildSettings = {PRODUCT_BUNDLE_IDENTIFIER = local.peiyu.Glance; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_UILaunchScreen_Generation = YES; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; CODE_SIGN_STYLE = Automatic;}; name = Release;};
+00000000000000000000000D = {isa = XCConfigurationList; buildConfigurations = (00000000000000000000000F,000000000000000000000010,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+00000000000000000000000E = {isa = XCConfigurationList; buildConfigurations = (000000000000000000000011,000000000000000000000012,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+}; rootObject = 000000000000000000000001;}

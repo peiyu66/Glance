@@ -1,0 +1,24 @@
+# Build and IDE state
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+# Private local governance and verification records
+/AGENTS.md
+/docs/計畫.md
+/docs/現行交接.md
+/docs/驗證/
+# Credentials and local configuration
+.env
+.env.*
+*.p12
+*.mobileprovision
+auth.json
+credentials.json
+tokens.json
+# Local capture or diagnostic data
+/captures/
+/logs/
+*.log
