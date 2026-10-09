@@ -29,3 +29,5 @@ Only after Gate 0 passes: local camera preview, central region stability, still 
 Test target changes and late responses, low light, front/back distinction, background return, recognition thresholds, latency, energy, and plan usage. Keep images in memory for the shortest practical time. Actual image lifecycle and matching thresholds remain implementation decisions to validate.
 
 See the [next-stage task proposal](NEXT_STEPS.md) for the completed baseline, ordered tasks, acceptance criteria, and user approval gates. New stages require a separate decision.
+
+Phase A is now authorized: an account-free loopback probe and two callback tests have been added. A signed iPhone build and installation passed after unlocking. Both 2-second and 45-second external-browser probes processed the callback only when Glance returned to the foreground; the automatic callback route failed the gate. Official OAuth remains untested. See [Phase A evidence](PHASE_A.md).

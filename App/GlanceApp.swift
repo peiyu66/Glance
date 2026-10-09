@@ -1,7 +1,11 @@
 import SwiftUI
+import Combine
 
 @main struct GlanceApp: App {
-    var body: some Scene { WindowGroup { MockView() } }
+    var body: some Scene { WindowGroup {
+        if ProcessInfo.processInfo.arguments.contains("--loopback-probe") { ProbeView() }
+        else { MockView() }
+    } }
 }
 
 struct MockView: View {
