@@ -58,3 +58,20 @@ Apple Xcode 27 SDK 的新 Callback 介面只有 customScheme 與需 associated d
 合成頁面不需帳戶 cookies，採 ephemeral session；不建立 OAuth 權限。只在本 app 前景測試期間避免自動熄屏，結束恢复，不新增背景執行或修改系統安全設定。實測 2 秒／45 秒，另以同一取消路徑在2秒執行取消，及測試專用3秒期限驗證 timeout。出現任何需用戶決定的系統提示即交回，不自行點同意。
 
 A2 狀態：Xcode 實機建置成功，已安裝至同一 iPhone；啟動被 Locked（CoreDevice 10002 / FBSOpenApplicationErrorDomain 7）拒絕。沒有系統認證視窗／callback 結果。目前僅需用戶解鎖一次，不需修改全域自動鎖定。
+
+## A2 實機結果：無帳戶可行性通過
+
+2026-10-09，同一實體 iPhone 13 mini / iOS 26.7.1，Apple 系統認證視窗（ASWebAuthenticationSession、ephemeral、callbackURLScheme nil）搭配同一個 127.0.0.1 HTTP listener。沒有自訂 callback scheme、真 OAuth、帳戶 cookies、debugger attach、背景保活或全域安全設定修改。
+
+| 測試 | 實際事件 | 判定 |
+| --- | --- | --- |
+| 2 秒延遲 | 1.0 秒 browser-page-loaded；3.1 秒 callback-accepted | 自動完成，未人工回前景 |
+| 45 秒延遲 | 0.3 秒 browser-page-loaded；45.3 秒 callback-accepted | 自動完成，未人工回前景 |
+| 取消 | callback 延遲45秒；2.0秒 cancelled | 同一取消路徑已觸發 |
+| 逾時 | 測試期限3秒、callback延遲45秒；3.0秒 timeout | 同一逾時路徑已觸發 |
+
+以上四輪均無 app-background 事件；這與外部瀏覽器兩輪需回前景的結果不同。取消/逾時由探針參數觸發，沒有模擬手指按系統取消鈕；也未單獨用第二個 socket 檢查 port 關閉。清理路徑已執行，仍不能宣稱完整 OAuth 錯誤恢复驗收。
+
+所有探針已結束，app 回到預設 Mock 畫面，使用者不需要再按測試按鈕或守著手機。未更動全域自動鎖定。測試期間僅本 app 前景避免自動熄屏，已恢復。
+
+**A 的本機無帳戶技術可行性已通過；G0 正式 Pro 授權仍未通過。** 未測官方授權端是否接受此原生組合、實際帳戶模型、圖片請求、身份/權限、refresh 或撤銷。下一關為 B 正式 SIWC 最小驗證，必須清楚告知持續權限及憑證保留，讓使用者在官方頁面自行登入與同意。

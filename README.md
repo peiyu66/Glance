@@ -2,7 +2,7 @@
 
 An early, open-source iPhone experiment for recognizing objects, visible text, and barcode values from a single image after the center of the camera view is stable.
 
-**Current state: local mock only.** The default mock does not connect to a camera, sign in, make network requests, or recognize real images. An optional [account-free loopback probe](docs/PHASE_A.md) uses only local HTTP and the system browser; physical-device tests show the external-browser callback is processed only after returning the app to the foreground. This route has not passed the feasibility gate. Native iPhone compatibility with official Sign in with ChatGPT remains an unpassed feasibility gate. A ChatGPT Pro subscription alone does not prove this integration works.
+**Current state: local mock only.** The default mock does not connect to a camera, sign in, make network requests, or recognize real images. An optional [account-free loopback probe](docs/PHASE_A.md) uses only local HTTP and the system browser; the external-browser route needs a foreground return, while the Apple system authentication window passed account-free 2-second and 45-second physical-device callbacks plus cancel/timeout paths. Official ChatGPT sign-in is still untested. Native iPhone compatibility with official Sign in with ChatGPT remains an unpassed feasibility gate. A ChatGPT Pro subscription alone does not prove this integration works.
 
 ## Run the mock
 

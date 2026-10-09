@@ -31,3 +31,5 @@ Test target changes and late responses, low light, front/back distinction, backg
 See the [next-stage task proposal](NEXT_STEPS.md) for the completed baseline, ordered tasks, acceptance criteria, and user approval gates. New stages require a separate decision.
 
 Phase A is now authorized: an account-free loopback probe and two callback tests have been added. A signed iPhone build and installation passed after unlocking. Both 2-second and 45-second external-browser probes processed the callback only when Glance returned to the foreground; the automatic callback route failed the gate. Official OAuth remains untested. See [Phase A evidence](PHASE_A.md).
+
+Update: Apple system authentication-window probes passed physical-device callbacks at 3.1s (2s delay) and 45.3s (45s delay), plus programmatic cancel and short-deadline timeout paths. Account-free feasibility is established for this device/OS; official ChatGPT authorization remains untested.
