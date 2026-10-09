@@ -31,4 +31,4 @@ The six core tests cover stability, deduplication, stale responses, returning ta
 - No persistent photos or sensitive logs. The mock stores at most eight target entries in memory and clears them when leaving the foreground.
 - No API-key billing fallback, borrowed app tokens, or remote authentication relay.
 
-See [roadmap and acceptance gates](docs/ROADMAP.md). This repository contains no credentials or live authentication implementation. MIT licensed; see [LICENSE](LICENSE).
+See [roadmap and acceptance gates](docs/ROADMAP.md) and the [next-stage task proposal](docs/NEXT_STEPS.md). This repository contains no credentials or live authentication implementation. MIT licensed; see [LICENSE](LICENSE).

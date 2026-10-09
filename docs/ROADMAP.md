@@ -27,3 +27,5 @@ Simulator build, installation, launch, and initial screen inspection succeeded. 
 Only after Gate 0 passes: local camera preview, central region stability, still capture, and on-device target matching. Turning a product over is a new target. Recognition returns all readable object names, text, and barcode values together; no mode selection or online product information lookup. The lower result area stays hidden while waiting or if nothing is recognized.
 
 Test target changes and late responses, low light, front/back distinction, background return, recognition thresholds, latency, energy, and plan usage. Keep images in memory for the shortest practical time. Actual image lifecycle and matching thresholds remain implementation decisions to validate.
+
+See the [next-stage task proposal](NEXT_STEPS.md) for the completed baseline, ordered tasks, acceptance criteria, and user approval gates. New stages require a separate decision.
