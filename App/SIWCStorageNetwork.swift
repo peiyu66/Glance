@@ -62,6 +62,7 @@ struct SIWCHTTPError: Error {
         startedAt = ProcessInfo.processInfo.systemUptime
         diagnostics = ["operation": operation, "phase": "request-started"]
     }
+    func markStage(_ phase: String) { diagnostics["phase"] = phase }
     private func elapsed() -> Int { Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000) }
     private func finishDiagnostic() {
         diagnostics["elapsedMilliseconds"] = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
@@ -116,8 +117,8 @@ struct SIWCHTTPError: Error {
         diagnostics["phase"] = "response-received"
         return data
     }
-    func stream(body: Data, bearer: String) async throws -> String {
-        startDiagnostic("synthetic-image"); defer { finishDiagnostic() }
+    func stream(body: Data, bearer: String, operation: String = "synthetic-image") async throws -> String {
+        startDiagnostic(operation); defer { finishDiagnostic() }
         var request = try makeRequest(url: SIWCProtocol.resource + "/responses", body: body, bearer: bearer)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let (bytes, response) = try await session.bytes(for: request)

@@ -5,7 +5,8 @@ import Combine
     var body: some Scene { WindowGroup {
         if ProcessInfo.processInfo.arguments.contains("--loopback-probe") { ProbeView() }
         else if ProcessInfo.processInfo.arguments.contains("--siwc-validation") { SIWCView() }
-        else { MockView() }
+        else if ProcessInfo.processInfo.arguments.contains("--mock") { MockView() }
+        else { CameraView() }
     } }
 }
 

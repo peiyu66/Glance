@@ -1,18 +1,20 @@
 # Glance
 
-An early, open-source iPhone experiment for recognizing objects, visible text, and barcode values from a single image after the center of the camera view is stable.
+A personal iPhone prototype that sends one still image after the center of the camera view is stable, then shows readable object names, text and barcode values together.
 
-**Current state: mock camera UI plus a verified native ChatGPT sign-in and synthetic-image path.** On the tested physical iPhone, official sign-in, identity/permission checks, device-only Keychain storage, cold-start session restoration and the authenticated model catalog passed. `gpt-6-luna` with `reasoning.effort=none` returned `response.completed` in about 2.58 seconds and correctly read a generated red square and “GLANCE 123”. Natural token refresh and revocation remain untested, so the full lifecycle gate is still open. No real camera is implemented. See [Phase B evidence](docs/PHASE_B.md) and [account-free callback probes](docs/PHASE_A.md).
+**Current state: the native ChatGPT Pro path works; the camera prototype is implemented but real-camera display acceptance is still open.** Official sign-in, identity/scope checks, device-only Keychain storage, model discovery, cold-start restoration and one natural token refresh passed on the tested iPhone. The model is `gpt-6-luna`, with `reasoning.effort=none`; no API-key billing fallback exists. See [Phase B](docs/PHASE_B.md) and [Phase C](docs/PHASE_C.md).
 
-## Run the mock
+The first real-camera trial returned a nonempty result, but target matching prevented display. The current revision fixes identity fragmentation and sparse-label quality checks, adds small-motion alignment, and preserves an in-flight target anchor. A generated-card replay exercises the actual controller without the camera or network. Simulator feature-print availability and near-identical label matching remain separate physical-device checks; this is not a production-ready recognition claim.
 
-Requires Xcode with an iOS Simulator runtime; deployment target iOS 17. Tested with Xcode 27.0 and an iPhone 17 simulator running iOS 27.0.
+## Run
 
-1. Open `Glance.xcodeproj` and select the Glance scheme and an iPhone simulator.
-2. Run the app. The Chinese buttons 正面 (front), 背面 (back), and 移開 (away) simulate targets.
-3. Keep a target selected for one second to show sample results at the bottom. Selecting away hides them immediately.
+Open `Glance.xcodeproj`, choose the Glance scheme and an iPhone. Deployment target is iOS 17; the current build was tested with Xcode 27.0. Physical deployment requires your own signing configuration. No credentials are included.
 
-These controls are development fixtures, not recognition modes in the intended product.
+The normal launch opens the camera page with capture paused. Configure the account through Settings, complete official authorization yourself, and verify plan/extra-credit settings at the official Usage page. Tap 開始取景 only after choosing an item you are comfortable sending. Hold the center target steady; one second is the trigger threshold, not a promise that the model finishes in one second. Results appear at the bottom when available. 暫停, opening settings, or leaving the foreground stops capture and clears temporary results. Returning to an active capture requires stability again.
+
+Unfinished, empty and failed recognition stays silent on the camera page. Settings has status categories, request counts and timing; no ordinary recognized text or photos are logged.
+
+## Verification
 
 ```sh
 swift test --scratch-path /tmp/Glance-build
@@ -21,14 +23,19 @@ xcodebuild -project Glance.xcodeproj -scheme Glance -sdk iphonesimulator \
   CODE_SIGNING_ALLOWED=NO build
 ```
 
-The six recognition-state tests cover stability, deduplication, stale responses, returning targets, target removal, independent reverse sides, silent empty results, cache eviction, and foreground reset. Two additional tests cover synthetic callback validation and replay rejection. Nine further SIWC protocol tests cover PKCE, callbacks, signed identity validation, request construction and stream completion (17 total tests). Core tests run on the host; simulator launch does not verify a real camera or authentication.
+32 host tests cover authentication and streaming, stable-target state, cancellation, late responses, bounded caches, image motion, quality checks, identity uncertainty and request admission. Test launch arguments are development tools:
+
+- `--mock`: original button-driven state demonstration.
+- `--camera-local-fixture`: generated-card matcher/controller replay; no live camera and no model requests.
+- `--camera-trial-once`: normal camera UI with at most one image request for a bounded engineering trial; the user still starts capture.
+- `--siwc-validation`: account validation page. Do not use automatic sign-in or network fixture flags without authorization.
+
+Simulator launch and injected-provider timing do not prove real camera, Vision matching, network latency or battery performance.
 
 ## Scope and privacy
 
-- iPhone first; no product database lookup, sharing, or encyclopedic explanations.
-- Intended behavior: one stable central target triggers one still-image request; readable names, text, and barcode values appear together.
-- Pending, empty, or failed recognition stays silent. Results hide when the target leaves.
-- No persistent photos or sensitive logs. The mock stores at most eight target entries in memory and clears them when leaving the foreground.
-- No API-key billing fallback, borrowed app tokens, or remote authentication relay.
+Central camera samples are processed locally at up to four per second. A stable, eligible target triggers one JPEG request; there is one request in flight and a minimum four-second gap. A short memory cache has at most eight targets and a 90-second lifetime. A product's back is a separate target; cross-face aggregation is not implemented.
 
-See [roadmap and acceptance gates](docs/ROADMAP.md) and the [next-stage task proposal](docs/NEXT_STEPS.md). The optional `--siwc-validation` launch argument opens the validation screen. Sign-in and inference require explicit user actions; no credentials are included in this repository. Do not use the test-only `--siwc-start` flag without explicit authorization for that sign-in attempt. MIT licensed; see [LICENSE](LICENSE).
+A local text digest helps reject conflicting labels during target matching. That local text is not shown as a result, logged or persisted; displayed recognition still comes from the authorized Pro provider. Matching thresholds and OCR stability require further device validation. No matcher can currently claim that all similar packaging is distinguished.
+
+No persistent photos, sensitive logs, borrowed app tokens, remote auth relay, product database lookup, sharing or commercial features. See the [plan and test rationale](docs/PHASE_C.md), [acceptance gates](docs/ROADMAP.md), [next work](docs/NEXT_STEPS.md), and [report](docs/Glance-專案與認證試驗報告.md). MIT licensed.

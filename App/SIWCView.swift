@@ -8,6 +8,7 @@ import Observation
     var catalog: [SIWCModel] = []
     var selectedModel = ""
     var status = "準備就緒；尚未開啟官方授權。"
+    private(set) var refreshCount = 0
     var busy = false
     var output = ""
     private var restoredSession = false
@@ -149,7 +150,7 @@ import Observation
             guard var next = saved, let index = next.accounts.firstIndex(where: { $0.id == account.id }) else { throw SIWCError.invalidIdentity }
             try Task.checkCancellation()
             next.accounts[index].tokens = replacement
-            try SIWCKeychain.save(next); saved = next
+            try SIWCKeychain.save(next); saved = next; refreshCount += 1
             return replacement
         } catch let error as SIWCHTTPError where error.terminalRefresh {
             try clearTokens(accountID: account.id); throw error
@@ -203,6 +204,27 @@ import Observation
                 status = "已收到 response.completed；正式影像最小測試完成。"; report("synthetic-image-completed")
             } catch { fail(error) }
         }
+    }
+    /// Camera provider uses the same Keychain account and serialized refresh path.
+    func recognize(jpeg: Data) async throws -> RecognitionResult {
+        guard !busy, planEnabled, planOnlyConfirmed else { throw SIWCError.planDisabled }
+        busy = true; defer { busy = false }
+        do {
+            let tokens = try await usableTokens()
+            guard SIWCProtocol.hasPlan(tokens.scope) else { throw SIWCError.planDisabled }
+            if catalog.isEmpty {
+                let data = try await SIWCHTTP.shared.data(url: SIWCProtocol.resource + "/models", bearer: tokens.access)
+                catalog = try JSONDecoder().decode(SIWCCatalog.self, from: data).models.filter { $0.visibility == "list" }
+            }
+            try Task.checkCancellation()
+            let body = try CameraAnswer.request(model: "gpt-6-luna", catalog: catalog, jpeg: jpeg)
+            let answer = try await SIWCHTTP.shared.stream(body: body, bearer: tokens.access, operation: "camera-image")
+            try Task.checkCancellation()
+            SIWCHTTP.shared.markStage("result-json-parse")
+            let result = try CameraAnswer.parse(answer)
+            SIWCHTTP.shared.markStage("result-parsed")
+            return result
+        } catch { SIWCHTTP.shared.recordFailure(error); throw error }
     }
     func signOut() {
         guard !busy, let account else { return }; busy = true; catalog = []; selectedModel = ""; output = ""
