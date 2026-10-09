@@ -2,7 +2,7 @@
 
 An early, open-source iPhone experiment for recognizing objects, visible text, and barcode values from a single image after the center of the camera view is stable.
 
-**Current state: local mock only.** The default mock does not connect to a camera, sign in, make network requests, or recognize real images. An optional [account-free loopback probe](docs/PHASE_A.md) uses only local HTTP and the system browser; the external-browser route needs a foreground return, while the Apple system authentication window passed account-free 2-second and 45-second physical-device callbacks plus cancel/timeout paths. Official ChatGPT sign-in is still untested. Native iPhone compatibility with official Sign in with ChatGPT remains an unpassed feasibility gate. A ChatGPT Pro subscription alone does not prove this integration works.
+**Current state: mock camera UI plus an optional official SIWC validation screen.** Physical-device Sign in with ChatGPT completed, including callback, ID-token verification and device-only Keychain storage. The authenticated catalog returned seven visible models and included `gpt-6-luna`. A controlled synthetic-image request returned HTTP 200 but stopped during local response validation/decoding without a confirmed terminal event. Session restoration passed; natural refresh and revocation remain untested; full Gate 0 has not passed. The default mock has no camera or network activity. See [Phase B evidence](docs/PHASE_B.md) and the earlier [account-free callback probes](docs/PHASE_A.md).
 
 ## Run the mock
 
@@ -21,7 +21,7 @@ xcodebuild -project Glance.xcodeproj -scheme Glance -sdk iphonesimulator \
   CODE_SIGNING_ALLOWED=NO build
 ```
 
-The eight core tests cover stability, deduplication, stale responses, returning targets, target removal, independent reverse sides, silent empty results, cache eviction, and foreground reset. Two additional tests cover synthetic callback validation and replay rejection. Core tests run on the host; simulator launch does not verify a real camera or authentication.
+The six recognition-state tests cover stability, deduplication, stale responses, returning targets, target removal, independent reverse sides, silent empty results, cache eviction, and foreground reset. Two additional tests cover synthetic callback validation and replay rejection. Eight further SIWC protocol tests cover PKCE, callbacks, signed identity validation, request construction and stream completion (16 total tests). Core tests run on the host; simulator launch does not verify a real camera or authentication.
 
 ## Scope and privacy
 
@@ -31,4 +31,4 @@ The eight core tests cover stability, deduplication, stale responses, returning 
 - No persistent photos or sensitive logs. The mock stores at most eight target entries in memory and clears them when leaving the foreground.
 - No API-key billing fallback, borrowed app tokens, or remote authentication relay.
 
-See [roadmap and acceptance gates](docs/ROADMAP.md) and the [next-stage task proposal](docs/NEXT_STEPS.md). This repository contains no credentials or live authentication implementation. MIT licensed; see [LICENSE](LICENSE).
+See [roadmap and acceptance gates](docs/ROADMAP.md) and the [next-stage task proposal](docs/NEXT_STEPS.md). The optional `--siwc-validation` launch argument opens the validation screen. Sign-in and inference require explicit user actions; no credentials are included in this repository. Do not use the test-only `--siwc-start` flag without explicit authorization for that sign-in attempt. MIT licensed; see [LICENSE](LICENSE).

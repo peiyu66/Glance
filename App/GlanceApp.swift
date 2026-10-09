@@ -4,6 +4,7 @@ import Combine
 @main struct GlanceApp: App {
     var body: some Scene { WindowGroup {
         if ProcessInfo.processInfo.arguments.contains("--loopback-probe") { ProbeView() }
+        else if ProcessInfo.processInfo.arguments.contains("--siwc-validation") { SIWCView() }
         else { MockView() }
     } }
 }
