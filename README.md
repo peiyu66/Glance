@@ -1,41 +1,30 @@
 # Glance
 
-A personal iPhone prototype that sends one still image after the center of the camera view is stable, then shows readable object names, text and barcode values together.
+Glance 是個人 iPhone 視覺辨識原型。將物件放在鏡頭中央、停穩約一秒後，App 會送出一張影像，並在畫面下方顯示可辨識的物件名稱、文字與條碼。
 
-**Current state: the native ChatGPT Pro path works; the camera prototype is implemented but real-camera display acceptance is still open.** Official sign-in, identity/scope checks, device-only Keychain storage, model discovery, cold-start restoration and one natural token refresh passed on the tested iPhone. The model is `gpt-6-luna`, with `reasoning.effort=none`; no API-key billing fallback exists. See [Phase B](docs/PHASE_B.md) and [Phase C](docs/PHASE_C.md).
+**目前仍在原型驗收階段。** 原生 ChatGPT Pro 授權、帳戶恢復與自然憑證更新已有個人裝置驗證；公開程式的真實取景與結果顯示仍需完成驗收，不能視為正式產品。
 
-The first real-camera trial returned a nonempty result, but target matching prevented display. The current revision fixes identity fragmentation and sparse-label quality checks, adds small-motion alignment, and preserves an in-flight target anchor. A generated-card replay exercises the actual controller without the camera or network. Simulator feature-print availability and near-identical label matching remain separate physical-device checks; this is not a production-ready recognition claim.
+## 使用方式
 
-## Run
+以 Xcode 開啟 `Glance.xcodeproj`，選擇 `Glance` scheme 與自己的 iPhone，設定個人簽署後建置。最低支援 iOS 17；目前使用 Xcode 27 開發。專案不包含帳號憑證。
 
-Open `Glance.xcodeproj`, choose the Glance scheme and an iPhone. Deployment target is iOS 17; the current build was tested with Xcode 27.0. Physical deployment requires your own signing configuration. No credentials are included.
+1. 在設定頁自行完成官方授權，並到官方 Usage 頁確認方案及額外額度設定。
+2. App 啟動時取景暫停。選好願意傳送的物件後，按「開始取景」。
+3. 將物件放在中央並保持穩定，等待下方辨識結果。一秒是觸發門檻，不是模型完成時間的保證。
+4. 按「暫停」、開啟設定或離開前景，會停止取景並清除暫存結果。
 
-The normal launch opens the camera page with capture paused. Configure the account through Settings, complete official authorization yourself, and verify plan/extra-credit settings at the official Usage page. Tap 開始取景 only after choosing an item you are comfortable sending. Hold the center target steady; one second is the trigger threshold, not a promise that the model finishes in one second. Results appear at the bottom when available. 暫停, opening settings, or leaving the foreground stops capture and clears temporary results. Returning to an active capture requires stability again.
+辨識未完成、沒有可讀內容或失敗時，取景頁保持安靜。設定頁提供請求次數與狀態等診斷資訊。
 
-Unfinished, empty and failed recognition stays silent on the camera page. Settings has status categories, request counts and timing; no ordinary recognized text or photos are logged.
+## 語言與使用體驗目標
 
-## Verification
+生成的物件名稱以繁體中文（台灣，`zh-Hant-TW`）與台灣慣用詞為主。包裝原文、品牌、型號及條碼應保留原本語言、字形與數字，不一律翻譯。
 
-```sh
-swift test --scratch-path /tmp/Glance-build
-xcodebuild -project Glance.xcodeproj -scheme Glance -sdk iphonesimulator \
-  -configuration Debug -derivedDataPath /tmp/Glance-derived \
-  CODE_SIGNING_ALLOWED=NO build
-```
+本機開發中的新版本另加入「保留最後有效結果，直到下一筆有效結果取代」的顯示策略，離開原畫面時標示「上次辨識」。這項策略及明確的台灣用語指示尚未隨本次文件更新發布；仍需完成新版本驗收。
 
-32 host tests cover authentication and streaming, stable-target state, cancellation, late responses, bounded caches, image motion, quality checks, identity uncertainty and request admission. Test launch arguments are development tools:
+## 範圍與隱私
 
-- `--mock`: original button-driven state demonstration.
-- `--camera-local-fixture`: generated-card matcher/controller replay; no live camera and no model requests.
-- `--camera-trial-once`: normal camera UI with at most one image request for a bounded engineering trial; the user still starts capture.
-- `--siwc-validation`: account validation page. Do not use automatic sign-in or network fixture flags without authorization.
+此原型使用原生授權的 Pro 路徑，模型為 `gpt-6-luna`、`reasoning.effort=none`，沒有付費 API key 備援。模型可用性仍以帳戶實際提供的清單為準。
 
-Simulator launch and injected-provider timing do not prove real camera, Vision matching, network latency or battery performance.
+穩定判斷與影像前處理在本機進行，符合條件時才傳送單張影像。App 不持久保存照片或一般辨識文字，不借用其他 App 的 token，也不提供遠端授權轉送、商品資料庫查詢、分享或商業功能。相似包裝辨識與不同實景的可靠性仍有限制。
 
-## Scope and privacy
-
-Central camera samples are processed locally at up to four per second. A stable, eligible target triggers one JPEG request; there is one request in flight and a minimum four-second gap. A short memory cache has at most eight targets and a 90-second lifetime. A product's back is a separate target; cross-face aggregation is not implemented.
-
-A local text digest helps reject conflicting labels during target matching. That local text is not shown as a result, logged or persisted; displayed recognition still comes from the authorized Pro provider. Matching thresholds and OCR stability require further device validation. No matcher can currently claim that all similar packaging is distinguished.
-
-No persistent photos, sensitive logs, borrowed app tokens, remote auth relay, product database lookup, sharing or commercial features. See the [plan and test rationale](docs/PHASE_C.md), [acceptance gates](docs/ROADMAP.md), [next work](docs/NEXT_STEPS.md), and [report](docs/Glance-專案與認證試驗報告.md). MIT licensed.
+開發環境、測試指令及工程模式見[開發指南](docs/開發指南.md)。驗收進度見[驗收路線](docs/ROADMAP.md)與[下一步](docs/NEXT_STEPS.md)。採用 [MIT 授權](LICENSE)。
