@@ -227,6 +227,32 @@ public struct CurrentDisplayGate {
     }
 }
 
+/// Successful answers only, kept in memory and ordered by captured request sequence.
+/// Arrival order never changes which answer is latest. No image data is retained.
+public struct RecognitionHistory: Sendable {
+    public struct Entry: Identifiable, Hashable, Sendable {
+        public let id: UUID
+        public let sequence: Int
+        public let capturedAt: TimeInterval
+        public let completedAt: TimeInterval
+        public let result: RecognitionResult
+        public init(id: UUID, sequence: Int, capturedAt: TimeInterval, completedAt: TimeInterval, result: RecognitionResult) {
+            self.id=id;self.sequence=sequence;self.capturedAt=capturedAt;self.completedAt=completedAt;self.result=result
+        }
+    }
+    public private(set) var entries: [Entry] = []
+    public var latest: Entry? { entries.last }
+    private let capacity: Int
+    public init(capacity: Int = 3) { self.capacity=max(0,capacity) }
+    @discardableResult public mutating func insert(_ entry: Entry) -> Bool {
+        guard entry.sequence > 0, entry.capturedAt.isFinite, entry.completedAt.isFinite,
+              entry.completedAt >= entry.capturedAt, !entry.result.lines.isEmpty,
+              entries.count < capacity, !entries.contains(where: { $0.id == entry.id || $0.sequence == entry.sequence }) else { return false }
+        entries.append(entry);entries.sort { $0.sequence < $1.sequence };return true
+    }
+    public mutating func clear() { entries.removeAll() }
+}
+
 /// Current-view queries. Adoption is independent of the single transport slot.
 /// Uses the passed first-capture stability rule; episodes are never cache identities.
 public struct LiveRecognitionSession {
@@ -238,17 +264,20 @@ public struct LiveRecognitionSession {
     }
     public struct Request: Equatable, Sendable {
         public let intent: Intent
+        public let sequence: Int
         public let snapshotCapturedAt: TimeInterval
         public let startedAt: TimeInterval
     }
     public private(set) var generation = UUID()
     public private(set) var queuedIntent: Intent?
     public private(set) var inflightRequest: Request?
-    public private(set) var visible: RecognitionResult?
+    public private(set) var history: RecognitionHistory
+    public var visible: RecognitionResult? { history.latest?.result }
     private var displayedRequest: Request?
-    public var visibleRequestID: UUID? { displayedRequest?.intent.id }
+    private var displayedVerifiedCurrent = false
+    public var visibleRequestID: UUID? { history.latest?.id }
     public var visibleIsPrevious: Bool {
-        visible != nil && (displayedRequest?.intent.generation != generation || displayedRequest?.intent.episode != stability.episode)
+        visible != nil && (!displayedVerifiedCurrent || displayedRequest?.intent.generation != generation || displayedRequest?.intent.episode != stability.episode)
     }
     public private(set) var adoptedCount = 0
     public private(set) var sentCount = 0
@@ -264,15 +293,15 @@ public struct LiveRecognitionSession {
     private var stability = FirstCaptureGate(limit: 0)
     private var adoptedEpisode: UUID?
     private var lastCapturedAt: TimeInterval?
-    private var response: (request: Request, result: RecognitionResult, completedAt: TimeInterval)?
+    private var response: (request: Request, completedAt: TimeInterval)?
     public var episode: UUID? { stability.episode }
     public var stableElapsed: TimeInterval { stability.stableElapsed }
     public var lastDistance: Float? { stability.lastDistance }
-    public init(limit: Int = 3) { self.limit = max(0, limit) }
+    public init(limit: Int = 3) { self.limit = max(0, limit);history=RecognitionHistory(capacity:max(0,limit)) }
 
     /// End current eligibility while retaining the last committed card in foreground.
     private mutating func clearCurrentEligibility() {
-        queuedIntent = nil; response = nil
+        queuedIntent = nil; response = nil; displayedVerifiedCurrent = false
         adoptedEpisode = nil; lastCapturedAt = nil
     }
     /// Returns a newly adopted intent even while an older transport is in flight.
@@ -289,8 +318,9 @@ public struct LiveRecognitionSession {
         guard let episode = stability.episode else { gate = stability.gate; return nil }
         lastCapturedAt = capturedAt
         if let response, response.request.intent.generation == generation,
-           response.request.intent.episode == episode, capturedAt > response.completedAt {
-            visible = response.result; displayedRequest = response.request
+           response.request.intent.episode == episode, capturedAt > response.completedAt,
+           history.latest?.id == response.request.intent.id {
+            displayedVerifiedCurrent = true
         }
         guard stability.stableElapsed >= stability.stableDuration else { gate = "stabilizing"; return nil }
         guard adoptedEpisode != episode else {
@@ -308,26 +338,33 @@ public struct LiveRecognitionSession {
               intent.generation == generation, intent.episode == stability.episode,
               snapshotCapturedAt == lastCapturedAt, time.isFinite, time >= snapshotCapturedAt,
               time-snapshotCapturedAt <= stability.maximumAge else { return nil }
-        let request = Request(intent: intent, snapshotCapturedAt: snapshotCapturedAt, startedAt: time)
+        let request = Request(intent: intent, sequence: sentCount+1, snapshotCapturedAt: snapshotCapturedAt, startedAt: time)
         queuedIntent = nil; inflightRequest = request; sentCount += 1; gate = "request-started"
         return request
     }
     /// Failed encoding remains deduplicated for this episode and spends no budget.
     public mutating func discardQueuedIntent() { queuedIntent = nil; gate = "encoding-failed" }
-    /// Completion frees only its own transport slot. Display requires a subsequent fresh frame.
+    /// Success is readable as history in the same active generation. Only a later
+    /// fresh same-episode frame may label the latest answer as current.
     @discardableResult public mutating func complete(_ request: Request, result: RecognitionResult?, at time: TimeInterval) -> Bool {
         guard inflightRequest == request else { lastCompletionReason = "unknown-or-duplicate-request"; return false }
         inflightRequest = nil; completedCount += 1
         lastCompletionFrameAge = lastCapturedAt.map { time-$0 }
         expire(at: time)
-        guard request.intent.generation == generation, request.intent.episode == stability.episode else {
+        guard request.intent.generation == generation else {
             discardedCount += 1
-            lastCompletionReason = request.intent.generation != generation ? "generation-stopped" : "episode-ended"
-            gate = "discarded-old-episode"; return false
+            lastCompletionReason = "generation-stopped"
+            gate = "discarded-stopped-generation"; return false
         }
         guard let result, !result.lines.isEmpty else { lastCompletionReason = "empty-or-failed"; gate = "empty-or-failed"; return false }
-        lastCompletionReason = "accepted-awaiting-new-frame"
-        response = (request, result, time); gate = "awaiting-post-response-frame"
+        let entry=RecognitionHistory.Entry(id:request.intent.id,sequence:request.sequence,capturedAt:request.snapshotCapturedAt,completedAt:time,result:result)
+        guard history.insert(entry) else { lastCompletionReason="duplicate-or-invalid-history";return false }
+        if history.latest?.id == request.intent.id {
+            displayedRequest=request;displayedVerifiedCurrent=false
+            response = (request, time)
+        }
+        lastCompletionReason = request.intent.episode == stability.episode ? "accepted-history-awaiting-new-frame" : "accepted-history-ended-episode"
+        gate = "successful-answer-recorded"
         return true
     }
     public mutating func expire(at time: TimeInterval) {
@@ -337,8 +374,9 @@ public struct LiveRecognitionSession {
             lastEpisodeReason = "frame-timeout"; lastEpisodeDistance = nil
         }
     }
-    public mutating func stop() {
-        generation = UUID(); stability.stop(); clearCurrentEligibility(); visible = nil; displayedRequest = nil; gate = "stopped"
+    public mutating func stop(preservingHistory: Bool = false) {
+        generation = UUID(); stability.stop(); clearCurrentEligibility(); gate = "stopped"
+        if !preservingHistory { history.clear();displayedRequest = nil }
         lastEpisodeReason = "stopped"; lastEpisodeDistance = nil
         // Keep the actual in-flight slot and spent budget until transport returns.
     }

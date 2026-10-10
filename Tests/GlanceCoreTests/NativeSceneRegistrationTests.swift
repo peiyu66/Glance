@@ -46,7 +46,7 @@ private func nativeTransformed(_ image:CGImage,t:Double,dx:Double,scale:Double,a
     #expect(state.visible?.names == ["A"])
     #expect(state.adoptedCount == 1 && state.sentCount == 1 && state.discardedCount == 0)
 }
-@Test(arguments:[false,true]) func nativeContentChangeMarksPreviousAAndRejectsLateResult(pending:Bool) throws {
+@Test(arguments:[false,true]) func nativeContentChangePreservesSuccessfulHistoryWithoutClaimingCurrent(pending:Bool) throws {
     let normalizer=NativeSceneRegistration(),a=nativeSource(textured:true),b=nativeSource(textured:true,changed:true)
     var state=LiveRecognitionSession()
     func feed(_ image:CGImage,_ t:Double) throws {
@@ -64,7 +64,7 @@ private func nativeTransformed(_ image:CGImage,t:Double,dx:Double,scale:Double,a
         else { #expect(state.visible?.names == ["A"] && state.visibleIsPrevious) }
     }
     #expect(state.adoptedCount == 2)
-    if pending { #expect({!state.complete(request,result:.init(names:["A"]),at:3)}()) }
+    if pending { #expect({state.complete(request,result:.init(names:["A"]),at:3)}()) }
     try feed(b,3.25)
     let next=try #require({state.startRequest(snapshotCapturedAt:3.25,at:3.25)}())
     #expect({state.complete(next,result:.init(names:["B"]),at:3.26)}())

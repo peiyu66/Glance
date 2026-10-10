@@ -30,14 +30,14 @@ private func liveFingerprint(_ changed: Bool = false) -> SceneFingerprint {
 private func liveFeed(_ state: inout LiveRecognitionSession, _ changed: Bool = false, from: Double, through: Double) {
     for t in stride(from: from, through: through, by: 0.25) { state.observe(liveFingerprint(changed), capturedAt: t, now: t) }
 }
-@Test func liveAdoptsOnceAndRequiresPostResponseFrame() throws {
+@Test func liveAdoptsOnceHistoryIsImmediateAndCurrentNeedsPostResponseFrame() throws {
     var state = LiveRecognitionSession()
     liveFeed(&state, from: 0, through: 1)
     let request = try #require({ state.startRequest(snapshotCapturedAt: 1, at: 1.01) }())
     liveFeed(&state, from: 1.25, through: 2)
     #expect(state.adoptedCount == 1 && state.sentCount == 1)
     #expect({ state.complete(request, result: .init(names: ["A"]), at: 2.01) }())
-    #expect(state.visible == nil)
+    #expect(state.visible?.names == ["A"] && state.visibleIsPrevious && state.history.entries.count == 1)
     liveFeed(&state, from: 2.25, through: 3)
     #expect(state.visible?.names == ["A"])
     #expect(state.adoptedCount == 1 && state.queuedIntent == nil)
@@ -50,8 +50,8 @@ private func liveFeed(_ state: inout LiveRecognitionSession, _ changed: Bool = f
     let bIntent = try #require(state.queuedIntent)
     #expect(bIntent.adoptedAt == 2.25 && state.adoptedCount == 2)
     #expect({ state.startRequest(snapshotCapturedAt: 1+delay, at: 1+delay) == nil }())
-    #expect({ !state.complete(a, result: .init(names: ["A"]), at: 1+delay) }())
-    #expect(state.visible == nil && state.discardedCount == 1)
+    #expect({ state.complete(a, result: .init(names: ["A"]), at: 1+delay) }())
+    #expect(state.visible?.names == ["A"] && state.visibleIsPrevious && state.discardedCount == 0)
     liveFeed(&state, true, from: 1.25+delay, through: 1.25+delay)
     let b = try #require({ state.startRequest(snapshotCapturedAt: 1.25+delay, at: 1.25+delay) }())
     #expect(b.intent == bIntent && b.startedAt > b.intent.adoptedAt)
@@ -68,9 +68,9 @@ private func liveFeed(_ state: inout LiveRecognitionSession, _ changed: Bool = f
     liveFeed(&state, from: 2.5, through: 3.5)
     let returnedA = try #require(state.queuedIntent)
     #expect(returnedA != b && returnedA.episode != a.intent.episode)
-    #expect({ !state.complete(a, result: .init(names: ["OLD A"]), at: 3.5) }())
+    #expect({ state.complete(a, result: .init(names: ["OLD A"]), at: 3.5) }())
     let next = try #require({ state.startRequest(snapshotCapturedAt: 3.5, at: 3.5) }())
-    #expect(next.intent == returnedA && state.sentCount == 2 && state.visible == nil)
+    #expect(next.intent == returnedA && state.sentCount == 2 && state.visible?.names == ["OLD A"] && state.visibleIsPrevious)
 }
 @Test func liveStopRetainsTransportAndBudgetRejectsLateResult() throws {
     var state = LiveRecognitionSession(limit: 1)
@@ -137,9 +137,9 @@ private func liveFeed(_ state: inout LiveRecognitionSession, _ changed: Bool = f
     }
     #expect(state.lastEpisodeReason == "scene-changed")
     #expect((state.lastEpisodeDistance ?? 0) > 0.035)
-    #expect({ !state.complete(ticket,result:.init(names:["A"]),at:25.01) }())
-    #expect(state.lastCompletionReason == "episode-ended")
-    #expect(state.discardedCount == 1 && state.visible == nil)
+    #expect({ state.complete(ticket,result:.init(names:["A"]),at:25.01) }())
+    #expect(state.lastCompletionReason == "accepted-history-ended-episode")
+    #expect(state.discardedCount == 0 && state.visible?.names == ["A"] && state.visibleIsPrevious)
     #expect((state.lastCompletionFrameAge ?? 1) < 0.02)
 }
 @Test func liveStoppedAndEmptyCompletionHaveDistinctReasons() throws {
@@ -168,7 +168,7 @@ private func shownA(_ state: inout LiveRecognitionSession) throws -> LiveRecogni
     #expect(state.visible?.names == ["A"] && state.visibleIsPrevious)
     let b=try #require({state.startRequest(snapshotCapturedAt:2.5,at:2.5)}())
     #expect({state.complete(b,result:.init(names:["B"]),at:2.51)}())
-    #expect(state.visible?.names == ["A"] && state.visibleIsPrevious)
+    #expect(state.visible?.names == ["B"] && state.visibleIsPrevious && state.history.entries.count == 2)
     liveFeed(&state,true,from:2.75,through:2.75)
     #expect(state.visible?.names == ["B"] && !state.visibleIsPrevious)
     #expect({!state.complete(a,result:.init(names:["LATE A"]),at:2.76)}())
@@ -208,13 +208,13 @@ private func shownA(_ state: inout LiveRecognitionSession) throws -> LiveRecogni
     #expect({!state.complete(b,result:.init(names:["LATE B"]),at:3)}())
     #expect(state.visible == nil && state.sentCount == 2)
 }
-@Test func responseThatNeverCommittedCannotBecomeRetainedAfterLeaving() throws {
+@Test func successfulResponseRemainsReadableAfterLeaving() throws {
     var state=LiveRecognitionSession()
     liveFeed(&state,from:0,through:1)
     let a=try #require({state.startRequest(snapshotCapturedAt:1,at:1)}())
     #expect({state.complete(a,result:.init(names:["A"]),at:1.01)}())
     liveFeed(&state,true,from:1.25,through:2.25)
-    #expect(state.visible == nil && !state.visibleIsPrevious)
+    #expect(state.visible?.names == ["A"] && state.visibleIsPrevious && state.history.entries.count == 1)
     let b=try #require({state.startRequest(snapshotCapturedAt:2.25,at:2.25)}())
     #expect({state.complete(b,result:.init(names:["B"]),at:2.26)}())
     liveFeed(&state,true,from:2.5,through:2.5)
@@ -232,7 +232,7 @@ private func shownA(_ state: inout LiveRecognitionSession) throws -> LiveRecogni
     #expect(state.visible?.summary == "第一件物品的簡介。" && state.visibleIsPrevious)
     let b=try #require({state.startRequest(snapshotCapturedAt:2.5,at:2.5)}())
     #expect({state.complete(b,result:.init(names:["B"],summary:"第二件物品的簡介。",text:["原文B"]),at:2.51)}())
-    #expect(state.visible?.summary == "第一件物品的簡介。")
+    #expect(state.visible?.summary == "第二件物品的簡介。" && state.visibleIsPrevious)
     liveFeed(&state,true,from:2.75,through:2.75)
     #expect(state.visible?.summary == "第二件物品的簡介。" && state.visible?.text == ["原文B"])
     #expect({!state.complete(a,result:.init(summary:"過期的錯誤簡介"),at:2.76)}())
