@@ -60,7 +60,12 @@ struct SIWCHTTPError: Error {
     private var startedAt = 0.0
     private func startDiagnostic(_ operation: String) {
         startedAt = ProcessInfo.processInfo.systemUptime
-        diagnostics = ["operation": operation, "phase": "request-started"]
+        diagnostics = ["operation": operation, "phase": "request-started",
+            "operationID": UUID().uuidString, "startedAt": ISO8601DateFormatter().string(from: Date()),
+            "requestTimeoutSeconds": 30, "resourceTimeoutSeconds": 120]
+    }
+    func prepareCameraRequest(_ id: String?) {
+        startDiagnostic("camera-preparation"); diagnostics["cameraRequestID"] = id
     }
     func markStage(_ phase: String) { diagnostics["phase"] = phase }
     private func elapsed() -> Int { Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000) }
@@ -81,6 +86,9 @@ struct SIWCHTTPError: Error {
             diagnostics["terminalEvent"] = stream.terminal; diagnostics["errorCategory"] = "stream-terminal"
             diagnostics["errorCode"] = stream.code; diagnostics["errorParameter"] = stream.parameter
         } else if error is CancellationError { diagnostics["errorCategory"] = "cancelled" }
+        else if let network = error as? URLError, network.code == .cancelled {
+            diagnostics["errorCategory"] = "cancelled"; diagnostics["transportCode"] = network.code.rawValue
+        }
         else if let network = error as? URLError {
             diagnostics["errorCategory"] = "transport"; diagnostics["transportCode"] = network.code.rawValue
         } else if error as? SIWCError == .incompleteStream { diagnostics["errorCategory"] = "stream-without-completion" }
@@ -117,8 +125,8 @@ struct SIWCHTTPError: Error {
         diagnostics["phase"] = "response-received"
         return data
     }
-    func stream(body: Data, bearer: String, operation: String = "synthetic-image") async throws -> String {
-        startDiagnostic(operation); defer { finishDiagnostic() }
+    func stream(body: Data, bearer: String, operation: String = "synthetic-image", cameraRequestID: String? = nil) async throws -> String {
+        startDiagnostic(operation); diagnostics["cameraRequestID"] = cameraRequestID; defer { finishDiagnostic() }
         var request = try makeRequest(url: SIWCProtocol.resource + "/responses", body: body, bearer: bearer)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let (bytes, response) = try await session.bytes(for: request)
@@ -147,26 +155,24 @@ struct SIWCHTTPError: Error {
             throw SIWCError.unexpectedContentType
         }
         diagnostics["phase"] = "stream-open"
-        var stream = SIWCStream()
-        do {
-            for try await byte in bytes {
-                if diagnostics["firstDataMilliseconds"] == nil { diagnostics["firstDataMilliseconds"] = elapsed() }
-                try Task.checkCancellation(); try stream.byte(byte)
-                if stream.completed { break }
+        let readStartedMS = elapsed()
+        var iterator = bytes.makeAsyncIterator()
+        let text = try await SIWCStreamReader.read(nextByte: { try await iterator.next() }) { counts, terminal, shape in
+            diagnostics["streamCounts"] = counts
+            diagnostics["receivedBytes"] = counts["receivedBytes"]
+            diagnostics["eventCount"] = counts["eventCount"]
+            diagnostics["lastEventShape"] = shape
+            diagnostics["terminalEvent"] = terminal
+            for (local, overall) in [("firstByteMS", "firstDataMilliseconds"), ("lastByteMS", "lastDataMilliseconds"),
+                                     ("firstEventMS", "firstEventMilliseconds"), ("lastEventMS", "lastEventMilliseconds")] {
+                if let time = counts[local] { diagnostics[overall] = readStartedMS + time }
             }
-            let text = try stream.finish()
-            diagnostics["terminalEvent"] = stream.terminal
-            diagnostics["terminalMilliseconds"] = elapsed()
-            diagnostics["phase"] = "completed"
-            return text
-        } catch {
-            diagnostics["terminalEvent"] = stream.terminal
-            diagnostics["eventCount"] = stream.eventCount
-            diagnostics["lastEventShape"] = stream.lastEventShape
-            if stream.terminal != nil { diagnostics["terminalMilliseconds"] = elapsed() }
-            throw error
+            if terminal != nil { diagnostics["terminalMilliseconds"] = elapsed() }
         }
+        diagnostics["phase"] = "completed"
+        return text
     }
+
     private func makeRequest(url: String, body: Data?, bearer: String?, form: Bool = false) throws -> URLRequest {
         guard let endpoint = URL(string: url), endpoint.scheme == "https", endpoint.user == nil, endpoint.password == nil,
               endpoint.port == nil, endpoint.query == nil, endpoint.fragment == nil,

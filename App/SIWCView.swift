@@ -206,9 +206,10 @@ import Observation
         }
     }
     /// Camera provider uses the same Keychain account and serialized refresh path.
-    func recognize(jpeg: Data) async throws -> RecognitionResult {
+    func recognize(jpeg: Data, requestID: String? = nil) async throws -> RecognitionResult {
         guard !busy, planEnabled, planOnlyConfirmed else { throw SIWCError.planDisabled }
         busy = true; defer { busy = false }
+        SIWCHTTP.shared.prepareCameraRequest(requestID)
         do {
             let tokens = try await usableTokens()
             guard SIWCProtocol.hasPlan(tokens.scope) else { throw SIWCError.planDisabled }
@@ -218,7 +219,7 @@ import Observation
             }
             try Task.checkCancellation()
             let body = try CameraAnswer.request(model: "gpt-6-luna", catalog: catalog, jpeg: jpeg)
-            let answer = try await SIWCHTTP.shared.stream(body: body, bearer: tokens.access, operation: "camera-image")
+            let answer = try await SIWCHTTP.shared.stream(body: body, bearer: tokens.access, operation: "camera-image", cameraRequestID: requestID)
             try Task.checkCancellation()
             SIWCHTTP.shared.markStage("result-json-parse")
             let result = try CameraAnswer.parse(answer)

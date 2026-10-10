@@ -3,7 +3,8 @@ import Combine
 
 @main struct GlanceApp: App {
     var body: some Scene { WindowGroup {
-        if ProcessInfo.processInfo.arguments.contains("--loopback-probe") { ProbeView() }
+        if ProcessInfo.processInfo.arguments.contains("--camera-summary-ui-fixture") { SummaryReadingFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("--loopback-probe") { ProbeView() }
         else if ProcessInfo.processInfo.arguments.contains("--siwc-validation") { SIWCView() }
         else if ProcessInfo.processInfo.arguments.contains("--mock") { MockView() }
         else { CameraView() }

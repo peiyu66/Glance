@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import GlanceCore
 
@@ -199,4 +200,165 @@ private func fingerprint(_ variant: Int = 0) -> SceneFingerprint {
     #expect(memory.resolve(fingerprint(1), at: 4, labelSignature: "123", additionalMatch: { _ in true }) != a)
     #expect(!FeatureEvidence.accepts(0.36, identicalReadableLabel: true))
     #expect(!FeatureEvidence.accepts(.nan, identicalReadableLabel: true))
+}
+
+@Test func initiallyUnreadableAnchorDoesNotAttachResultToNewlyReadableLabel() {
+    var memory = TargetMemory()
+    let fp = fingerprint()
+    let original = memory.resolve(fp, at: 0, labelSignature: "")!
+    var state = RecognitionState()
+    _ = state.observe(original, at: 0)
+    let request = state.observe(original, at: 1)!
+    let newlyReadable = memory.resolve(fp, at: 1.5, protectedID: original, labelSignature: "generated-digest")
+    #expect(newlyReadable == nil)
+    #expect(memory.entries.count == 1)
+    _ = state.observe(newlyReadable, at: 1.5)
+    state.complete(request, result: RecognitionResult(names: ["generated-result"]))
+    _ = state.observe(newlyReadable, at: 3.75)
+    #expect(state.visible == nil)
+    let returnToOriginal = memory.resolve(fp, at: 4, labelSignature: "")
+    #expect(returnToOriginal == original)
+    _ = state.observe(returnToOriginal, at: 4)
+    _ = state.observe(returnToOriginal, at: 5)
+    #expect(state.visible?.names == ["generated-result"])
+}
+
+@Test func identityEvidenceMatrixWithAvailableVision() {
+    struct Scenario {
+        let name: String
+        let anchorLabel: String
+        let currentLabel: String
+        let distance: Float
+        let expected: String
+        let expectedVisualChecks: Int
+    }
+    let scenarios = [
+        Scenario(name: "both-missing-strong-vision", anchorLabel: "", currentLabel: "", distance: 0.02, expected: "same", expectedVisualChecks: 1),
+        Scenario(name: "both-missing-weak-vision", anchorLabel: "", currentLabel: "", distance: 0.13, expected: "uncertain", expectedVisualChecks: 1),
+        Scenario(name: "missing-to-readable-strong-vision", anchorLabel: "", currentLabel: "123", distance: 0.02, expected: "uncertain", expectedVisualChecks: 0),
+        Scenario(name: "readable-to-missing-strong-vision", anchorLabel: "123", currentLabel: "", distance: 0.02, expected: "uncertain", expectedVisualChecks: 0),
+        Scenario(name: "matching-label-translated-vision", anchorLabel: "123", currentLabel: "123", distance: 0.3226, expected: "same", expectedVisualChecks: 1),
+        Scenario(name: "matching-label-weak-vision", anchorLabel: "123", currentLabel: "123", distance: 0.36, expected: "uncertain", expectedVisualChecks: 1),
+        Scenario(name: "contradictory-digit-very-close-vision", anchorLabel: "123", currentLabel: "128", distance: 0.02, expected: "new", expectedVisualChecks: 0),
+        Scenario(name: "contradictory-digit-measured-close-vision", anchorLabel: "123", currentLabel: "128", distance: 0.09348, expected: "new", expectedVisualChecks: 0)
+    ]
+    for scenario in scenarios {
+        var memory = TargetMemory()
+        let fp = fingerprint()
+        let original = memory.resolve(fp, at: 0, labelSignature: scenario.anchorLabel)!
+        var visualChecks = 0
+        let resolved = memory.resolve(fp, at: 1, protectedID: original, labelSignature: scenario.currentLabel) { _ in
+            visualChecks += 1
+            return FeatureEvidence.accepts(scenario.distance, identicalReadableLabel: !scenario.currentLabel.isEmpty)
+        }
+        let disposition = resolved == nil ? "uncertain" : resolved == original ? "same" : "new"
+        #expect(disposition == scenario.expected)
+        #expect(visualChecks == scenario.expectedVisualChecks)
+        #expect(memory.entries.count == (scenario.expected == "new" ? 2 : 1))
+        print("IDENTITY_MATRIX \(scenario.name): \(disposition); visualChecks=\(visualChecks); entries=\(memory.entries.count)")
+    }
+    // The historical one-digit negative had a visually close distance. Visual
+    // availability alone cannot justify adopting a new label onto an empty anchor.
+    #expect(FeatureEvidence.accepts(0.09348, identicalReadableLabel: false))
+}
+
+@Test func missingLabelBlocksButReturningVerifiedLabelRestoresCachedResult() {
+    var memory = TargetMemory()
+    let fp = fingerprint()
+    let original = memory.resolve(fp, at: 0, labelSignature: "123")!
+    var state = RecognitionState()
+    _ = state.observe(original, at: 0)
+    let request = state.observe(original, at: 1)!
+    let missing = memory.resolve(fp, at: 1.25, protectedID: original, labelSignature: "") { _ in
+        FeatureEvidence.accepts(0.02, identicalReadableLabel: false)
+    }
+    #expect(missing == nil)
+    _ = state.observe(missing, at: 1.25)
+    state.complete(request, result: RecognitionResult(names: ["generated-A"]))
+    #expect(state.visible == nil)
+    let restored = memory.resolve(fp, at: 2, labelSignature: "123") { _ in
+        FeatureEvidence.accepts(0.3226, identicalReadableLabel: true)
+    }
+    #expect(restored == original)
+    #expect(state.observe(restored, at: 2) == nil && state.visible == nil)
+    #expect(state.observe(restored, at: 3) == nil && state.visible?.names == ["generated-A"])
+    #expect(memory.entries.count == 1)
+}
+
+@Test func emptyAnchorCanRemainUncertainWithoutFragmentingOrShowingWrongDigit() {
+    var memory = TargetMemory()
+    let fp = fingerprint()
+    let original = memory.resolve(fp, at: 0, labelSignature: "")!
+    var state = RecognitionState()
+    _ = state.observe(original, at: 0)
+    let request = state.observe(original, at: 1)!
+    state.complete(request, result: RecognitionResult(names: ["generated-A"]))
+    // This is a liveness limitation, not a positive first-display acceptance.
+    // Two possible newly readable digits must both remain unverified against
+    // an anchor whose text was never available, even with close visual evidence.
+    for (index, label) in ["123", "128", "123", "128"].enumerated() {
+        let time = 2 + Double(index)
+        let resolved = memory.resolve(fp, at: time, protectedID: original, labelSignature: label) { _ in
+            FeatureEvidence.accepts(0.09348, identicalReadableLabel: true)
+        }
+        #expect(resolved == nil)
+        #expect(state.observe(resolved, at: time) == nil)
+        #expect(state.visible == nil)
+        #expect(memory.entries.count == 1 && memory.entries.first?.id == original)
+    }
+}
+
+@Test func contradictoryDigitCannotDisplayEarlierResultWithCloseVision() {
+    var memory = TargetMemory()
+    let fp = fingerprint()
+    let a = memory.resolve(fp, at: 0, labelSignature: "123")!
+    var state = RecognitionState()
+    _ = state.observe(a, at: 0)
+    let requestA = state.observe(a, at: 1)!
+    let b = memory.resolve(fp, at: 1.5, protectedID: a, labelSignature: "128") { _ in
+        FeatureEvidence.accepts(0.09348, identicalReadableLabel: true)
+    }
+    #expect(b != nil && b != a)
+    _ = state.observe(b, at: 1.5, allowRequest: false)
+    state.complete(requestA, result: RecognitionResult(names: ["generated-A"]))
+    _ = state.observe(b, at: 3, allowRequest: false)
+    #expect(state.visible == nil)
+    let back = memory.resolve(fp, at: 4, labelSignature: "123") { _ in
+        FeatureEvidence.accepts(0.02, identicalReadableLabel: true)
+    }
+    #expect(back == a)
+    _ = state.observe(back, at: 4, allowRequest: false)
+    _ = state.observe(back, at: 5, allowRequest: false)
+    #expect(state.visible?.names == ["generated-A"])
+}
+
+
+@Test func cameraRequestUsesTaiwanChineseWithoutTranslatingSourceText() throws {
+    let model = SIWCModel(slug: "gpt-6-luna", display_name: "Fixture", visibility: "list")
+    let bytes = try CameraAnswer.request(model: model.slug, catalog: [model], jpeg: Data([1, 2, 3]))
+    let body = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+    let input = try #require(body["input"] as? [[String: Any]])
+    let content = try #require(input.first?["content"] as? [[String: Any]])
+    let prompt = try #require(content.first?["text"] as? String)
+    #expect(prompt.contains("Traditional Chinese as used in Taiwan (zh-Hant-TW)"))
+    #expect(prompt.contains("natural Taiwanese vocabulary"))
+    #expect(prompt.contains("verbatim in its original language and script"))
+    #expect(prompt.contains("do not translate or normalize it"))
+    #expect(prompt.contains("preserving all digits and leading zeros"))
+    #expect(prompt.contains("four keys: names (array of strings), summary (string), text (array of strings), barcodes (array of strings)"))
+    #expect(prompt.contains("No web lookup, outside facts"))
+    #expect(body["model"] as? String == "gpt-6-luna")
+    #expect(body["store"] as? Bool == false)
+    #expect(body["stream"] as? Bool == true)
+    #expect((body["reasoning"] as? [String: String])?["effort"] == "none")
+    #expect(content.count == 2)
+    #expect(content.last?["image_url"] as? String == "data:image/jpeg;base64,AQID")
+    #expect(Set(body.keys) == Set(["model", "reasoning", "store", "stream", "input"]))
+}
+
+@Test func cameraAnswerPreservesSourceScriptBrandsModelsAndLeadingZeros() throws {
+    let result = try CameraAnswer.parse(#"{"names":["隨身碟"],"text":["包装文字","Acme USB-C","AB-001","臺灣製造"],"barcodes":["0012345678905"]}"#)
+    #expect(result.names == ["隨身碟"])
+    #expect(result.text == ["包装文字", "Acme USB-C", "AB-001", "臺灣製造"])
+    #expect(result.barcodes == ["0012345678905"])
 }

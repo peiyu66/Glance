@@ -163,9 +163,23 @@ public struct SIWCStream {
     private var eventSize = 0
     private var lineBytes: [UInt8] = []
     private var afterCR = false
+    public private(set) var byteCount = 0
+    public private(set) var lineCount = 0
+    public private(set) var blankLineCount = 0
+    public private(set) var commentLineCount = 0
+    public private(set) var dataLineCount = 0
+    public private(set) var framedEventCount = 0
+    /// Counts only: no text, payload, hashes or server identifiers.
+    public var safeCounts: [String: Int] {
+        ["byteCount": byteCount, "lineCount": lineCount, "blankLineCount": blankLineCount,
+         "commentLineCount": commentLineCount, "dataLineCount": dataLineCount,
+         "framedEventCount": framedEventCount, "eventCount": eventCount,
+         "bufferedLineBytes": lineBytes.count, "bufferedEventBytes": eventSize]
+    }
     public init() {}
     /// Preserve SSE's empty lines. Foundation AsyncSequence.lines omits them.
     public mutating func byte(_ byte: UInt8) throws {
+        byteCount += 1
         if byte == 10 && afterCR { afterCR = false; return }
         afterCR = false
         if byte == 10 || byte == 13 {
@@ -177,14 +191,20 @@ public struct SIWCStream {
             lineBytes.append(byte)
         }
     }
-    public mutating func line(_ line: String) throws {
+    public mutating func line(_ input: String) throws {
+        let line = input
+        lineCount += 1
+        if line.isEmpty { blankLineCount += 1 }
+        if line.hasPrefix(":") { commentLineCount += 1 }
         if line.hasPrefix("data:") {
+            dataLineCount += 1
             var data = String(line.dropFirst(5)); if data.first == " " { data.removeFirst() }
             eventSize += data.utf8.count + 1
             guard eventSize <= 1_000_000 else { throw SIWCError.sseSizeLimit }
             eventData.append(data)
         } else if line.isEmpty && !eventData.isEmpty {
             let payload = eventData.joined(separator: "\n"); eventData = []; eventSize = 0
+            framedEventCount += 1
             if payload == "[DONE]" { return }
             guard let data = payload.data(using: .utf8) else { throw SIWCError.sseInvalidUTF8 }
             eventCount += 1
@@ -207,12 +227,44 @@ public struct SIWCStream {
         }
     }
     public mutating func finish() throws -> String {
-        if !lineBytes.isEmpty {
-            guard let value = String(bytes: lineBytes, encoding: .utf8) else { throw SIWCError.sseInvalidUTF8 }
-            lineBytes = []; try line(value)
-        }
-        try line("")
+        // EOF is not an SSE blank-line delimiter. Never synthesize completion
+        // from a truncated terminal; retain only buffer counts for diagnosis.
         guard completed else { throw SIWCError.incompleteStream }
         return text
+    }
+}
+
+/// Shared by the URLSession path and deterministic offline transports. Progress
+/// exposes counts/timing/shape only, never model text or response payloads.
+public enum SIWCStreamReader {
+    @MainActor public static func read(
+        nextByte: @MainActor () async throws -> UInt8?,
+        progress: ([String: Int], String?, [String: Bool]) -> Void
+    ) async throws -> String {
+        var parser = SIWCStream()
+        let started = ProcessInfo.processInfo.systemUptime
+        var milestones: [String: Int] = ["receivedBytes": 0]
+        func snapshot() {
+            progress(parser.safeCounts.merging(milestones) { _, new in new }, parser.terminal, parser.lastEventShape)
+        }
+        defer { snapshot() }
+        while let byte = try await nextByte() {
+            milestones["receivedBytes", default: 0] += 1
+            let elapsed = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+            if milestones["firstByteMS"] == nil { milestones["firstByteMS"] = elapsed }
+            milestones["lastByteMS"] = elapsed
+            try Task.checkCancellation()
+            let previous = parser.eventCount
+            try parser.byte(byte)
+            if parser.eventCount > previous {
+                if milestones["firstEventMS"] == nil { milestones["firstEventMS"] = elapsed }
+                milestones["lastEventMS"] = elapsed
+            }
+            if parser.byteCount == 1 || byte == 10 || byte == 13 || parser.byteCount % 4096 == 0 { snapshot() }
+            if parser.completed { break }
+        }
+        // Cancellation wins even when a transport completes without throwing.
+        try Task.checkCancellation()
+        return try parser.finish()
     }
 }

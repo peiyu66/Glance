@@ -1,18 +1,15 @@
-# Acceptance gates
+# 驗收路線
 
-Updated 2026-10-09. This is an evidence summary; [Phase C](PHASE_C.md) owns the current hypotheses, test rationale and decisions.
+最後更新：2026-10-10。各項證據只支持實際覆蓋範圍；詳細紀錄見[相機驗證](PHASE_C.md)。
 
-| Gate | Evidence | Status |
-| --- | --- | --- |
-| Native Pro feasibility | Official OAuth, identity/scope validation, Keychain storage, authenticated model catalog, completed synthetic image | Passed for the tested account/device; not a universal support claim |
-| Session lifecycle | Cold-start restoration and one natural refresh | Passed for those paths; revocation not tested |
-| Host and simulator | 34 host tests, build, generated-card injected-provider controller replay | Passed within reported fixture limits; simulator Vision feature print unavailable |
-| Real camera recognition | Nonempty completed single-image response received | Provider path passed; display/matching acceptance still open |
-| Generated-card identity and controller | Physical-device Vision, seven identity cases and twelve controller checks passed | Passed for fixtures; live display pending |
-| Everyday usage | Live first-result/cache timing, near-identical products, backs, low light, battery/usage | Not accepted yet |
+| 項目 | 證據與狀態 |
+| --- | --- |
+| 原生 Pro 可行性 | 個人裝置的官方授權、身份／scope、Keychain、模型目錄及合成圖完成已通過；不代表所有帳戶都支援。 |
+| 帳戶生命週期 | 冷啟動恢復與一次自然續期通過；撤銷未測。 |
+| 核心與合成 | 普通入口整合 99 核心測試；iPhone 15 個生成影片情境／612 幀；正式 SwiftUI 6 組／78 檢查通過。 |
+| 本輪真實 UX | 本人確認保留卡片、名稱／簡介、原文展開及捲動可用；簡介品質後續再改善。 |
+| 普通啟動入口 | 已改為新管線；無參數冷啟動已核相機關閉、0/3、無待送／在途。 |
+| 使用成本 | 五狀態行為已讀碼核對；耗電、CPU／GPU、溫度、流量及逐次服務端額度尚未量測。 |
+| 普遍可靠性 | 近似包裝、低光反光、背面、長時間使用與全面正確率未作完整驗收。 |
 
-The product is personal and iPhone-only. All readable names, text and barcode values appear together at the bottom, without recognition modes or online product lookup. Waiting and empty results stay silent. Camera frames remain local until a stable-target single JPEG request; images are not persisted. Backgrounding clears memory and cancels work. Late results cannot attach to a different target.
-
-The official account catalog must expose the chosen model; this project's tested account exposed `gpt-6-luna`, and image input with `reasoning.effort=none` completed. No separate API billing or borrowed-token fallback is allowed. Official Usage settings govern extra credits; a local confirmation checkbox is only an attestation.
-
-History: [external browser and system-window probes](PHASE_A.md), [formal sign-in and SSE fixes](PHASE_B.md), [current camera work](PHASE_C.md), [next steps](NEXT_STEPS.md).
+本原型為個人 iPhone 使用，不新增商品查詢、分享、商業化、跨面整合或其他付費路徑。歷史文件中的「移開即清空／快取認回」不能當成本輪 live 模式的現行顯示規則；以 README 為準。

@@ -162,3 +162,116 @@ private struct SigningFixture {
     for byte in #"{"status":"completed"}"#.utf8 { try json.byte(byte) }
     #expect(throws: SIWCError.incompleteStream) { try json.finish() }
 }
+
+@Test func sseLeadingBOMDoesNotDropFirstEvent() throws {
+    var parser = SIWCStream()
+    let fixture = "\u{FEFF}" + #"data: {"type":"response.completed"}"# + "\n\n"
+    for byte in fixture.utf8 { try parser.byte(byte) }
+    #expect(parser.completed)
+    #expect(try parser.finish() == "")
+}
+
+@Test func sseUnterminatedTerminalCannotBecomeSuccessAtEOF() throws {
+    for suffix in ["", "\n", "\r\n"] {
+        var parser = SIWCStream()
+        for byte in (#"data: {"type":"response.completed"}"# + suffix).utf8 { try parser.byte(byte) }
+        #expect(!parser.completed)
+        #expect(throws: SIWCError.incompleteStream) { try parser.finish() }
+    }
+}
+
+@Test @available(macOS 15.0, *) @MainActor func asyncStreamReaderPreservesFramingAcrossTransportChunks() async throws {
+    for newline in ["\n", "\r\n", "\r"] {
+        let body = [": heartbeat", "", "event: delta", #"data: {"type":"response.output_text.delta","delta":"合成測試"}"#, "", #"data: {"type":"response.completed"}"#, "", ""].joined(separator: newline)
+        let (bytes, source) = AsyncThrowingStream<UInt8, Error>.makeStream()
+    var iterator = bytes.makeAsyncIterator()
+        let producer = Task { @MainActor in
+            for (index, byte) in body.utf8.enumerated() {
+                source.yield(byte)
+                if index % 7 == 0 { await Task.yield() }
+            }
+            source.finish()
+        }
+        var counts: [String: Int] = [:]; var terminal: String?
+        let answer = try await SIWCStreamReader.read(nextByte: { try await iterator.next(isolation: MainActor.shared) }) { counts = $0; terminal = $1; _ = $2 }
+        await producer.value
+        #expect(answer == "合成測試")
+        #expect(terminal == "response.completed")
+        #expect(counts["eventCount"] == 2 && counts["framedEventCount"] == 2)
+        #expect(counts["commentLineCount"] == 1 && counts["bufferedEventBytes"] == 0)
+        #expect(counts["firstByteMS"] != nil && counts["firstEventMS"] != nil)
+        #expect(counts["byteCount"] == counts["receivedBytes"])
+    }
+}
+
+@Test @available(macOS 15.0, *) @MainActor func asyncStreamCancellationRetainsPartialBufferCounts() async throws {
+    let (bytes, source) = AsyncThrowingStream<UInt8, Error>.makeStream()
+    var iterator = bytes.makeAsyncIterator()
+    var counts: [String: Int] = [:]
+    let reader = Task { @MainActor in
+        try await SIWCStreamReader.read(nextByte: { try await iterator.next(isolation: MainActor.shared) }) { counts = $0; _ = $1; _ = $2 }
+    }
+    // Header and initial bytes are not a complete event. This reproduces the
+    // class of state observed on-device without asserting its unknown payload.
+    let partial = "data: {\"type\":\"response.output_text.delta\""
+    for byte in partial.utf8 { source.yield(byte) }
+    for _ in 0..<100 where counts["receivedBytes"] == nil { await Task.yield() }
+    reader.cancel(); source.finish()
+    do { _ = try await reader.value; Issue.record("Cancellation must not return partial text") }
+    catch is CancellationError {} catch { Issue.record("Unexpected error: \(type(of: error))") }
+    #expect((counts["receivedBytes"] ?? 0) > 0)
+    #expect(counts["eventCount"] == 0)
+    #expect((counts["bufferedLineBytes"] ?? 0) > 0)
+    #expect(counts["firstEventMS"] == nil)
+}
+
+@Test @available(macOS 15.0, *) @MainActor func asyncStreamTimeoutIsDistinctFromCancellationAndCompletion() async throws {
+    let (bytes, source) = AsyncThrowingStream<UInt8, Error>.makeStream()
+    var iterator = bytes.makeAsyncIterator()
+    for byte in ": keepalive\n\n".utf8 { source.yield(byte) }
+    source.finish(throwing: URLError(.timedOut))
+    var counts: [String: Int] = [:]
+    do { _ = try await SIWCStreamReader.read(nextByte: { try await iterator.next(isolation: MainActor.shared) }) { counts = $0; _ = $1; _ = $2 }; Issue.record("Timeout must propagate") }
+    catch let error as URLError { #expect(error.code == .timedOut) }
+    #expect(counts["eventCount"] == 0)
+    #expect(counts["commentLineCount"] == 1 && counts["bufferedLineBytes"] == 0)
+}
+
+@Test @available(macOS 15.0, *) @MainActor func asyncStreamEOFRetainsUnterminatedEventEvidence() async throws {
+    let (bytes, source) = AsyncThrowingStream<UInt8, Error>.makeStream()
+    var iterator = bytes.makeAsyncIterator()
+    for byte in (#"data: {"type":"response.completed"}"# + "\n").utf8 { source.yield(byte) }
+    source.finish()
+    var counts: [String: Int] = [:]
+    do { _ = try await SIWCStreamReader.read(nextByte: { try await iterator.next(isolation: MainActor.shared) }) { counts = $0; _ = $1; _ = $2 }; Issue.record("Truncated terminal must fail") }
+    catch let error as SIWCError { #expect(error == .incompleteStream) }
+    #expect(counts["dataLineCount"] == 1 && counts["eventCount"] == 0)
+    #expect((counts["bufferedEventBytes"] ?? 0) > 0)
+}
+
+@Test @available(macOS 15.0, *) @MainActor func cancellationAfterCompletedEventStillWins() async throws {
+    let (bytes, source) = AsyncThrowingStream<UInt8, Error>.makeStream()
+    var iterator = bytes.makeAsyncIterator()
+    for byte in (#"data: {"type":"response.completed"}"# + "\n\n").utf8 { source.yield(byte) }
+    source.finish()
+    var terminalSeen = false
+    let reader = Task { @MainActor in
+        try await SIWCStreamReader.read(nextByte: { try await iterator.next(isolation: MainActor.shared) }) { _, terminal, _ in
+            if terminal == "response.completed" {
+                terminalSeen = true
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+    }
+    do { _ = try await reader.value; Issue.record("Cancelled completion must not escape") }
+    catch is CancellationError {}
+    #expect(terminalSeen)
+}
+
+@Test func sseBufferCapFailsWithoutExposingPayload() throws {
+    var parser = SIWCStream()
+    for _ in 0..<1_000_000 { try parser.byte(97) }
+    #expect(throws: SIWCError.sseSizeLimit) { try parser.byte(97) }
+    #expect(parser.safeCounts["bufferedLineBytes"] == 1_000_000)
+    #expect(parser.safeCounts["eventCount"] == 0)
+}

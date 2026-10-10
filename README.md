@@ -1,41 +1,47 @@
 # Glance
 
-A personal iPhone prototype that sends one still image after the center of the camera view is stable, then shows readable object names, text and barcode values together.
+Glance 是個人 iPhone 視覺辨識原型。將物件放在鏡頭中央、停穩約一秒後，App 會送出一張影像，在畫面下方顯示名稱、AI 撰寫的繁體中文簡介、可展開的原文與條碼。
 
-**Current state: the native ChatGPT Pro path works; the camera prototype is implemented but real-camera display acceptance is still open.** Official sign-in, identity/scope checks, device-only Keychain storage, model discovery, cold-start restoration and one natural token refresh passed on the tested iPhone. The model is `gpt-6-luna`, with `reasoning.effort=none`; no API-key billing fallback exists. See [Phase B](docs/PHASE_B.md) and [Phase C](docs/PHASE_C.md).
+**目前仍是個人驗收原型。** 本輪使用者已確認保留卡片、原文展開與捲動的使用體驗可用；簡介品質仍待後續改善，不能視為所有物件的正確率或完整產品驗收。
 
-The first real-camera trial returned a nonempty result, but target matching prevented display. A subsequent physical-device generated-card replay passed seven identity cases and all twelve controller checks, including shifted-card first-result visibility, distinct one-character labels, cached return and late-result isolation. It uses real Vision and the production text reader with an injected provider; live-camera display and actual recognition latency still need acceptance. See [Phase C](docs/PHASE_C.md) for failures, fixes and test rationale.
+> 普通啟動已採本輪驗收的新辨識管線，冷啟動仍停在待開始；不需要測試旗標。
 
-## Run
+## 使用方式
 
-Open `Glance.xcodeproj`, choose the Glance scheme and an iPhone. Deployment target is iOS 17; the current build was tested with Xcode 27.0. Physical deployment requires your own signing configuration. No credentials are included.
+以 Xcode 開啟 `Glance.xcodeproj`，選擇 `Glance` scheme 與自己的 iPhone，設定個人簽署後建置。最低支援 iOS 17；目前使用 Xcode 27 開發。工程模式設定見[開發指南](docs/開發指南.md)，專案不包含帳號憑證。
 
-The normal launch opens the camera page with capture paused. Configure the account through Settings, complete official authorization yourself, and verify plan/extra-credit settings at the official Usage page. Tap 開始取景 only after choosing an item you are comfortable sending. Hold the center target steady; one second is the trigger threshold, not a promise that the model finishes in one second. Results appear at the bottom when available. 暫停, opening settings, or leaving the foreground stops capture and clears temporary results. Returning to an active capture requires stability again.
+1. 在設定頁完成官方授權，到官方 Usage 頁確認方案並停用額外點數，再於 App 勾選確認。
+2. 冷啟動時取景暫停。選好願意傳送的物件後，按「開始取景」。
+3. 將物件放在中央並保持穩定，等待結果。一秒是觸發門檻，不是模型完成時間保證。
+4. 最後有效結果會保留到下一筆有效結果取代；離開原畫面時標示「上次辨識」。簡介可捲動閱讀，原文預設收合。
+5. 按「暫停」、開啟設定或離開前景，會停止取景並清除暫存結果。若先前正在取景，回到前景會自動恢復；手動暫停後不會自動恢復。
 
-Unfinished, empty and failed recognition stays silent on the camera page. Settings has status categories, request counts and timing; no ordinary recognized text or photos are logged.
+尚無有效結果時，等待、空結果與失敗保持安靜；已有結果時會保留上次卡片。晚到的過期回覆不能首次顯示或覆蓋新結果。
 
-## Verification
+完整流程、三次計數與工程門檻見[取景與辨識流程](docs/取景與辨識流程.md)。
 
-```sh
-swift test --scratch-path /tmp/Glance-build
-xcodebuild -project Glance.xcodeproj -scheme Glance -sdk iphonesimulator \
-  -configuration Debug -derivedDataPath /tmp/Glance-derived \
-  CODE_SIGNING_ALLOWED=NO build
-```
+## 執行成本與資源使用
 
-34 host tests cover authentication and streaming, stable-target state, cancellation, late responses, bounded caches, image motion, quality checks, identity uncertainty and request admission. Test launch arguments are development tools:
+最後核對：**2026-10-10，本輪保留卡片與 AI 簡介、普通啟動整合版**。這是程式行為說明；訂閱、方案用量、額外點數及行動網路費用仍依帳戶與電信設定，不代表免費。
 
-- `--mock`: original button-driven state demonstration.
-- `--camera-local-fixture`: generated-card matcher/controller replay; no live camera and no model requests.
-- `--camera-trial-once`: normal camera UI with at most one image request for a bounded engineering trial; the user still starts capture.
-- `--siwc-validation`: account validation page. Do not use automatic sign-in or network fixture flags without authorization.
+| 狀態 | 相機、本機處理與螢幕 | 網路與 AI 用量 |
+| --- | --- | --- |
+| App 冷啟動、待開始 | 相機未開，沒有影格分析；介面與亮著的螢幕仍耗資源。 | 載入本機帳戶狀態，不自動送辨識。自行操作登入或帳戶功能另會連網。 |
+| 開始取景 | 相機及預覽持續運作，本機取樣、品質與穩定判斷使用運算和電力；並非每格都上傳。 | 符合條件才傳單張影像，可能使用方案額度；需要時先更新授權或取得模型清單。沒有閒置 AI 輪詢或失敗自動重送。 |
+| 手動暫停 | 停止相機、影格分析與監看；介面和亮屏仍有成本。 | 不再送新辨識，要求取消已在途工作；取消不等於免計費。 |
+| 回到背景 | 停止相機與影格處理，清除暫存結果。先前正在取景時，回前景會恢復上述取景成本。 | 不再送新辨識，要求取消在途工作，可能仍有取消收尾；不執行背景 AI 輪詢。 |
+| 結束 App 程序 | 程序終止後，App 的相機與本機運算停止；切到背景不等於程序終止。 | 本機工作不再繼續，但已送達的伺服器請求可能仍完成或消耗額度；再次冷啟動回待開始。 |
 
-Simulator launch and injected-provider timing do not prove real camera, Vision matching, network latency or battery performance.
+目前版本保留本輪驗收上限：每個控制器生命期最多 **3 次辨識送出嘗試**，跨暫停與背景保留，新程序重建預算。這不是成功數、所有網路請求上限，也不是永久產品承諾；達上限不會自動關閉相機。無效或過暗的畫面會先被品質檢查擋住，但仍有前段本機處理；已在途請求不會只因畫面改變而取消。不使用時請按「暫停」。
 
-## Scope and privacy
+本原型只採已驗證的原生 Pro 方案授權路徑，沒有付費 API key 備援，也不會自行購買點數或切換付費方式；方案不足或授權失敗時停止送出。**額外點數必須由本人在官方頁面停用**：App 的勾選僅保存確認，無法讀取或保證官方開關狀態。已送出的工作、取消時機與實際用量以服務端紀錄為準。
 
-Central camera samples are processed locally at up to four per second. A stable, eligible target triggers one JPEG request; there is one request in flight and a minimum four-second gap. A short memory cache has at most eight targets and a 90-second lifetime. A product's back is a separate target; cross-face aggregation is not implemented.
+尚未量測每小時耗電、CPU／GPU 負載、溫度、實際相機幀率、單次傳輸量或每次辨識的實際額度。本表只核對本 App 的取景與推論路徑，不宣稱涵蓋作業系統或官方登入服務的全部網路活動。維護時須同步更新成本說明，見[資源行為與驗證清單](docs/開發指南.md#資源行為與驗證清單)。
 
-A local text digest helps reject conflicting labels during target matching. That local text is not shown as a result, logged or persisted; displayed recognition still comes from the authorized Pro provider. Matching thresholds and OCR stability require further device validation. No matcher can currently claim that all similar packaging is distinguished.
+## 語言、範圍與隱私
 
-No persistent photos, sensitive logs, borrowed app tokens, remote auth relay, product database lookup, sharing or commercial features. See the [plan and test rationale](docs/PHASE_C.md), [acceptance gates](docs/ROADMAP.md), [next work](docs/NEXT_STEPS.md), and [report](docs/Glance-專案與認證試驗報告.md). MIT licensed.
+名稱及簡介使用繁體中文（台灣，`zh-Hant-TW`）與台灣慣用詞。簡介只依畫面可辨識證據撰寫；包裝原文、品牌、型號與條碼保留原本語言、字形與數字。藥品標籤不能作為個人用藥建議，模糊細節不應臆測。
+
+模型為 `gpt-6-luna`、`reasoning.effort=none`，可用性以帳戶實際模型清單為準。App 不持久保存照片或一般辨識文字，不借用其他 App 的 token，也不提供商品資料庫查詢、分享或商業功能。相似包裝、低光、反光及長時間使用仍有未驗證限制。
+
+開發與測試見[開發指南](docs/開發指南.md)，進度見[驗收路線](docs/ROADMAP.md)與[下一步](docs/NEXT_STEPS.md)。採用 [MIT 授權](LICENSE)。
