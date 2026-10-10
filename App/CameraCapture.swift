@@ -83,19 +83,31 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             } catch { stats.visionRejected += 1; onFrame?(nil, generation, stats); onFailure?("local-vision") }
         }
     }
-    /// Local text is used only as a conservative identity veto; it is never displayed,
-    /// logged, persisted or sent separately. Keep only its normalized digest in memory.
-    static func labelSignature(_ image: CGImage) throws -> String {
+    struct LabelReading {
+        let signature: String
+        let candidateCount: Int
+        let maximumConfidence: Float
+        let processingMS: Double
+    }
+    /// Return only a digest and safe counts. Ordinary OCR text never leaves this scope.
+    static func labelReading(_ image: CGImage, minimumHeight: Float? = nil, minimumConfidence: Float = 0.5) throws -> LabelReading {
+        let start = ProcessInfo.processInfo.systemUptime
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hant", "en-US"]
         request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.02
+        // Use the same default-resolution configuration as the real-device probe.
+        // The fixture compares the previous height and confidence settings separately.
+        if let minimumHeight { request.minimumTextHeight = minimumHeight }
         try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
-        let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first }
-            .filter { $0.confidence >= 0.8 }
-            .map { $0.string.lowercased().filter { !$0.isWhitespace } }
-            .filter { !$0.isEmpty }.sorted()
+        let candidates = (request.results ?? []).compactMap { $0.topCandidates(1).first }
+        let lines = LabelEvidence.normalizedLines(candidates.map { ($0.string,$0.confidence) }, minimumConfidence: minimumConfidence)
+        return LabelReading(signature: labelDigest(lines), candidateCount: candidates.count,
+                            maximumConfidence: candidates.map(\.confidence).max() ?? 0,
+                            processingMS: (ProcessInfo.processInfo.systemUptime-start)*1000)
+    }
+    static func labelSignature(_ image: CGImage) throws -> String { try labelReading(image).signature }
+    static func labelDigest(_ lines: [String]) -> String {
         guard !lines.isEmpty else { return "" }
         return SHA256.hash(data: Data(lines.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
     }

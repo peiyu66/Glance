@@ -78,3 +78,30 @@ Pro回答嚴格解析名稱、文字、條碼三欄；同時顯示在固定底�
 模擬器VNGenerateImageFeaturePrintRequest回傳NSOSStatusErrorDomain/-1；它只在明示fixture中略過特徵判定，production沒有此略過。模擬器文字摘要也沒有可用證據，GLANCE 123／128尚不能據此宣告通過。實機零相機回放及修正後真相機顯示仍待驗證，保留這個反例而不隱藏失敗。當前尚無新增真相機雲端請求。
 
 實機修正版已再次BUILD SUCCEEDED並安裝，既有Keychain保留。零相機回放啟動被裝置鎖定阻擋（CoreDevice／Locked），因此未執行；此為需要本人短暫解鎖的實際阻礙，不是OAuth或相機權限失敗。下一步只解鎖並保持Glance前景約一分鐘，代理執行生成卡片驗證；無需再拍照。
+
+## 最新實機回放：2026-10-09 23:07 UTC
+
+本人告知解鎖後立即launch成功，讀回Glance自己的生成卡片報告：本機保存的安全實機計數（未公開）。Vision可用，零camera、networkRequests=0，沒有重登。matcherPassed=false、readyForCameraTrial=false；12項controllerChecks中11通過，firstResultVisible=false。
+
+同一卡片左右平移約2%，Vision distance=0.2417／0.3226，超過目前0.12，身份未認回；原位與不同顏色反例通過。只差一字卡片distance=0.09348，小於0.12，且labelEvidencePresent=false，誤用第一張身份。獨立文字probe每張均有1個candidate，confidence為0.5或1，但production摘要全空；需要核對摘要請求配置與probe差異（minimumTextHeight）及信心篩選，不能宣稱OCR硬體不支援。不要只整體放寬Vision閾值，須同時保住一字差negative control。
+
+目前可以讓本人離開手機，不需保持亮屏。修正本機匹配／文字證據初估10–20分鐘，完成後再安排一次短暫零相機回放；通過前不安排真實取景。已回覆具體失敗及估時；未新增程式變更、模型請求、Git推送或Library版本。之前sim的12項通過不能覆蓋此次真機11/12。
+
+
+## 23:10 UTC 修正假設與判定設計（實測前記錄）
+
+真機的平移距離0.2417／0.3226大於0.12，而一字差0.09348反而更小，證明不能只找一個新的Vision距離門檻。改為空間指紋門檻不變，先要求非空文字digest完全一致，再允許Vision距離低於0.35；無文字仍維持0.12。不同文字不得沿用原身份，缺文字維持不確定。文字取樣仍須一秒穩定，信心0.5只是候選篩選，不是辨識正確率保證。
+
+實機probe與正式摘要只差minimumTextHeight和confidence篩選。當前SDK header明示minimumTextHeight預設0.0，以最高可用解析度處理；0.02可能觸發下採樣。移除該覆寫並統一正式讀取與測試入口，同一批生成卡片另外分別重跑舊高度和舊信心設定，記錄計數／是否有摘要，定位各設定的作用，不讀私人文字。正例保留原位及±2%平移；反例增加平移的一字差卡片；實際reader摘要必須等於程式生成的預期文字，不能用預期值代替reader。尚未取得此修正版實機結果。
+
+## 最新：23:12 UTC 真機修正回放通過
+
+2026-10-09T23:12:26Z，同一iPhone更新後仍可啟動，沒有再次要求本人解鎖。fixtureRevision=2；Vision可用，7個正反例與12項controllerChecks全通過，matcherPassed=true、readyForCameraTrial=true、networkRequests=0。未拍照、未重新登入；這次沒有feature略過，也沒有注入預期文字，所有卡片由正式labelReading讀取，digest皆符合生成文字。
+
+同一卡片原位、左右約2%平移皆認回；不同顏色、原位GLANCE 128與平移GLANCE 128均未誤用GLANCE 123身份。平移後首次visible狀態、移開隱藏、回看cache、晚回B隔離、暫停／取消清理全通過。這是實機Vision加注入provider的controller狀態驗證，尚未證明live相機完整體驗。
+
+設定對照顯示，平移等正確辨讀樣本只有0.5信心，舊0.8篩選會刪除；0.02最小高度配合新篩選仍能得到摘要，不能把該高度單獨當成文字消失的唯一原因。正式reader已統一預設解析度，保留0.5候選，再要求完全相同的文字digest、原有空間門檻、受限Vision距離與一秒穩定共同判定。無文字仍採原本嚴格距離，不只是放寬單一門檻。
+
+34項host測試與實機編譯通過。文字處理約87.5–233.6ms／張（僅生成卡片OCR部分，含第一張初始化）；回放首次3.75秒、cache1秒是注入時鐘，不能當成真實相機或模型延遲。
+
+下一步先切到最多一筆請求的工程模式，再由本人選非敏感物品短暫取景、移開、回看。當前相機已暫停，沒有模型請求待執行，不需本人守著手機。真實顯示、可讀條碼、低光、耗電與完整延遲仍未验收。

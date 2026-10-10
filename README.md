@@ -4,7 +4,7 @@ A personal iPhone prototype that sends one still image after the center of the c
 
 **Current state: the native ChatGPT Pro path works; the camera prototype is implemented but real-camera display acceptance is still open.** Official sign-in, identity/scope checks, device-only Keychain storage, model discovery, cold-start restoration and one natural token refresh passed on the tested iPhone. The model is `gpt-6-luna`, with `reasoning.effort=none`; no API-key billing fallback exists. See [Phase B](docs/PHASE_B.md) and [Phase C](docs/PHASE_C.md).
 
-The first real-camera trial returned a nonempty result, but target matching prevented display. The current revision fixes identity fragmentation and sparse-label quality checks, adds small-motion alignment, and preserves an in-flight target anchor. A generated-card replay exercises the actual controller without the camera or network. Simulator feature-print availability and near-identical label matching remain separate physical-device checks; this is not a production-ready recognition claim.
+The first real-camera trial returned a nonempty result, but target matching prevented display. A subsequent physical-device generated-card replay passed seven identity cases and all twelve controller checks, including shifted-card first-result visibility, distinct one-character labels, cached return and late-result isolation. It uses real Vision and the production text reader with an injected provider; live-camera display and actual recognition latency still need acceptance. See [Phase C](docs/PHASE_C.md) for failures, fixes and test rationale.
 
 ## Run
 
@@ -23,7 +23,7 @@ xcodebuild -project Glance.xcodeproj -scheme Glance -sdk iphonesimulator \
   CODE_SIGNING_ALLOWED=NO build
 ```
 
-32 host tests cover authentication and streaming, stable-target state, cancellation, late responses, bounded caches, image motion, quality checks, identity uncertainty and request admission. Test launch arguments are development tools:
+34 host tests cover authentication and streaming, stable-target state, cancellation, late responses, bounded caches, image motion, quality checks, identity uncertainty and request admission. Test launch arguments are development tools:
 
 - `--mock`: original button-driven state demonstration.
 - `--camera-local-fixture`: generated-card matcher/controller replay; no live camera and no model requests.

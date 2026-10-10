@@ -101,6 +101,25 @@ public struct SceneQuality: Sendable {
     }
 }
 
+/// OCR confidence is a filter, not a probability. Identity still needs exact text,
+/// spatial agreement, an independent feature check and the one-second stability gate.
+public enum LabelEvidence {
+    public static func normalizedLines(_ candidates: [(String, Float)], minimumConfidence: Float = 0.5) -> [String] {
+        Array(Set(candidates.filter { $0.1.isFinite && $0.1 >= minimumConfidence }
+            .map { String($0.0.prefix(1000)).lowercased().filter { !$0.isWhitespace } }
+            .filter { !$0.isEmpty })).sorted()
+    }
+}
+
+public enum FeatureEvidence {
+    /// Spatial and exact label agreement are checked by TargetMemory before this gate.
+    /// An unlabeled target keeps the strict threshold. Labeled targets have independent
+    /// identity evidence to tolerate the feature-print shift measured on device.
+    public static func accepts(_ distance: Float, identicalReadableLabel: Bool) -> Bool {
+        distance.isFinite && distance >= 0 && distance < (identicalReadableLabel ? 0.35 : 0.12)
+    }
+}
+
 public struct TargetMemory {
     public struct Entry { public let id: String; let anchor: SceneFingerprint; let labelSignature: String; let created: TimeInterval }
     public private(set) var entries: [Entry] = []

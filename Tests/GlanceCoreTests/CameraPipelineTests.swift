@@ -179,3 +179,24 @@ private func fingerprint(_ variant: Int = 0) -> SceneFingerprint {
     #expect(memory.resolve(fp, at: 4, labelSignature: "digest-123") == a)
     #expect(memory.resolve(fp, at: 5, labelSignature: "digest-128") == b)
 }
+
+@Test func labelEvidencePreservesDifferentDigitsAndRejectsLowConfidence() {
+    #expect(LabelEvidence.normalizedLines([(" GLANCE 123 ", 0.5), ("glance123",1), ("wrong",0.49), ("",1)]) == ["glance123"])
+    #expect(LabelEvidence.normalizedLines([("GLANCE 128", 0.5)]) != LabelEvidence.normalizedLines([("GLANCE 123",0.5)]))
+    #expect(LabelEvidence.normalizedLines([("invalid",.nan)]).isEmpty)
+}
+@Test func translatedFeatureNeedsBothSpatialAndExactLabelEvidence() {
+    var memory = TargetMemory()
+    let fp = fingerprint()
+    let a = memory.resolve(fp, at: 0, labelSignature: "123")!
+    let translatedDistance: Float = 0.3226 // measured real-device same-card translation
+    #expect(!FeatureEvidence.accepts(translatedDistance, identicalReadableLabel: false))
+    #expect(memory.resolve(fp, at: 1, labelSignature: "123", additionalMatch: { _ in FeatureEvidence.accepts(translatedDistance, identicalReadableLabel: true) }) == a)
+    // A different digit is independent contradictory evidence, even if Vision is close.
+    let b = memory.resolve(fp, at: 2, labelSignature: "128", additionalMatch: { _ in FeatureEvidence.accepts(0.09348, identicalReadableLabel: true) })
+    #expect(b != nil && b != a)
+    #expect(memory.resolve(fp, at: 3, labelSignature: "") == nil)
+    #expect(memory.resolve(fingerprint(1), at: 4, labelSignature: "123", additionalMatch: { _ in true }) != a)
+    #expect(!FeatureEvidence.accepts(0.36, identicalReadableLabel: true))
+    #expect(!FeatureEvidence.accepts(.nan, identicalReadableLabel: true))
+}

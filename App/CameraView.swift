@@ -124,7 +124,7 @@ import Observation
             if frame.feature == nil && fixtureProvider != nil { return true } // explicit offline fixture only
             guard let previous = features[id], let currentFeature = frame.feature else { return false }
             var distance: Float = .infinity
-            do { try currentFeature.computeDistance(&distance, to: previous); lastFeatureDistance = min(lastFeatureDistance ?? .infinity, distance); return distance < 0.12 } catch { return false }
+            do { try currentFeature.computeDistance(&distance, to: previous); lastFeatureDistance = min(lastFeatureDistance ?? .infinity, distance); return FeatureEvidence.accepts(distance, identicalReadableLabel: !frame.labelSignature.isEmpty) } catch { return false }
         }
         if let target, !knownTargets.contains(target) { features[target] = frame.feature; knownTargets.insert(target); newTargets += 1 }
         let valid = Set(memory.entries.map(\.id)); features = features.filter { valid.contains($0.key) }
@@ -210,13 +210,13 @@ import Observation
         var memory = TargetMemory(); var prints: [String: VNFeaturePrintObservation] = [:]
         var visionAvailable = true
         var cases: [[String: Any]] = []; var firstID: String?; var generatedFrames: [CameraFrame] = []
-        for (index, dx) in [0.0, 10.0, -10.0, 0.0, 0.0, 0.0].enumerated() {
+        for (index, dx) in [0.0, 10.0, -10.0, 0.0, 0.0, 0.0, 10.0].enumerated() {
             let renderer = UIGraphicsImageRenderer(size: CGSize(width: 512, height: 512))
             let image = renderer.image { ctx in
                 UIColor(white: 0.93, alpha: 1).setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 512, height: 512))
                 (index == 4 ? UIColor.systemRed : UIColor.systemBlue).setFill(); ctx.fill(CGRect(x: 130+dx, y: 60, width: 250, height: 390))
                 UIColor.white.setFill(); ctx.fill(CGRect(x: 150+dx, y: 180, width: 210, height: 150))
-                ((index == 5 ? "GLANCE 128" : "GLANCE 123") as NSString).draw(at: CGPoint(x: 157+dx, y: 225), withAttributes: [.font: UIFont.systemFont(ofSize: 28), .foregroundColor: UIColor.black])
+                ((index >= 5 ? "GLANCE 128" : "GLANCE 123") as NSString).draw(at: CGPoint(x: 157+dx, y: 225), withAttributes: [.font: UIFont.systemFont(ofSize: 28), .foregroundColor: UIColor.black])
             }
             do {
                 guard let cg = image.cgImage, let fp = CameraCapture.fingerprint(cg), let fine = CameraCapture.fingerprint(cg, side: 128) else { throw SIWCError.invalidResponse }
@@ -230,27 +230,28 @@ import Observation
                     let ns = error as NSError; visionError = ["domain": ns.domain, "code": ns.code]
                 }
                 if observation == nil { visionAvailable = false }
-                let label = try CameraCapture.labelSignature(cg)
-                let textProbe = VNRecognizeTextRequest()
-                textProbe.recognitionLevel = .accurate; textProbe.usesLanguageCorrection = false
-                textProbe.recognitionLanguages = ["zh-Hant", "en-US"]
-                try VNImageRequestHandler(cgImage: cg, orientation: .up).perform([textProbe])
-                let textCandidates = (textProbe.results ?? []).compactMap { $0.topCandidates(1).first }
+                // Compare the production reader against each previous setting, using
+                // generated text only. Do not substitute expected labels into frames.
+                let reading = try CameraCapture.labelReading(cg)
+                let previousHeight = try CameraCapture.labelReading(cg, minimumHeight: 0.02)
+                let previousConfidence = try CameraCapture.labelReading(cg, minimumConfidence: 0.8)
+                let label = reading.signature
+                let expected = CameraCapture.labelDigest([index >= 5 ? "glance128" : "glance123"])
                 generatedFrames.append(CameraFrame(image: cg, fingerprint: fp, feature: observation, labelSignature: label, time: 0))
                 var featureDistance: Float = 0
                 let id = memory.resolve(fp, at: Double(index), labelSignature: label) { key in
                     guard let observation else { return true } // fingerprint-only fixture is labelled below
                     guard let prior = prints[key] else { return false }
-                    do { try observation.computeDistance(&featureDistance, to: prior); return featureDistance < 0.12 } catch { return false }
+                    do { try observation.computeDistance(&featureDistance, to: prior); return FeatureEvidence.accepts(featureDistance, identicalReadableLabel: !label.isEmpty) } catch { return false }
                 }
                 if let id, prints[id] == nil { prints[id] = observation }
                 if index == 0 { firstID = id }
-                cases.append(["identityMatchesExpected": id != nil && ((id == firstID) == (index < 4)), "expectedSameTarget": index < 4, "textCandidateCount": textCandidates.count, "textMaxConfidence": textCandidates.map(\.confidence).max() ?? 0, "labelEvidencePresent": !label.isEmpty, "visionError": visionError, "case": index, "sameTarget": id == firstID && id != nil, "clear": SceneQuality(fine).usable, "featureDistance": featureDistance, "fingerprintDistance": memory.bestDistance ?? 0])
+                cases.append(["identityMatchesExpected": id != nil && ((id == firstID) == (index < 4)), "expectedSameTarget": index < 4, "labelMatchesGeneratedText": label == expected, "oldMinimumHeightHasEvidence": !previousHeight.signature.isEmpty, "oldConfidenceFilterHasEvidence": !previousConfidence.signature.isEmpty, "textProcessingMS": reading.processingMS, "textCandidateCount": reading.candidateCount, "textMaxConfidence": reading.maximumConfidence, "labelEvidencePresent": !label.isEmpty, "visionError": visionError, "case": index, "sameTarget": id == firstID && id != nil, "clear": SceneQuality(fine).usable, "featureDistance": featureDistance, "fingerprintDistance": memory.bestDistance ?? 0])
             } catch { cases.append(["case": index, "error": "local-fixture-validation"]) }
         }
         var checks: [String: Bool] = [:]
         var simulatedTiming: [String: Double] = [:]
-        if generatedFrames.count == 6 {
+        if generatedFrames.count == 7 {
             // Exercise the actual controller with generated frames and a deterministic
             // provider continuation. No capture session or network provider is started.
             fixtureTime = 0; running = true; generation = UUID()
@@ -305,7 +306,7 @@ import Observation
             fixtureProvider = nil; fixtureTime = nil
         }
         if let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
-           let data = try? JSONSerialization.data(withJSONObject: ["fixture": "generated-card-motion", "networkRequests": 0, "visionAvailable": visionAvailable, "matcherPassed": cases.count == 6 && cases.allSatisfy { ($0["identityMatchesExpected"] as? Bool) == true }, "readyForCameraTrial": visionAvailable && cases.count == 6 && cases.allSatisfy { ($0["identityMatchesExpected"] as? Bool) == true && ($0["labelEvidencePresent"] as? Bool) == true } && checks.count == 12 && checks.values.allSatisfy { $0 }, "cases": cases, "controllerChecks": checks, "simulatedTiming": simulatedTiming], options: [.sortedKeys]) {
+           let data = try? JSONSerialization.data(withJSONObject: ["fixture": "generated-card-motion", "fixtureRevision": 2, "recordedAt": ISO8601DateFormatter().string(from: Date()), "networkRequests": 0, "visionAvailable": visionAvailable, "matcherPassed": cases.count == 7 && cases.allSatisfy { ($0["identityMatchesExpected"] as? Bool) == true }, "readyForCameraTrial": visionAvailable && cases.count == 7 && cases.allSatisfy { ($0["identityMatchesExpected"] as? Bool) == true && ($0["labelMatchesGeneratedText"] as? Bool) == true } && checks.count == 12 && checks.values.allSatisfy { $0 }, "cases": cases, "controllerChecks": checks, "simulatedTiming": simulatedTiming], options: [.sortedKeys]) {
             try? data.write(to: root.appendingPathComponent("camera-local-fixture.json"), options: .atomic)
         }
     }
