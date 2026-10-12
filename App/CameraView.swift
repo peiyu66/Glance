@@ -272,7 +272,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
                 if let provider { value = try await provider(jpeg) }
                 else { value = try await self.account.recognize(jpeg:jpeg,requestID:request.intent.id.uuidString) }
                 try Task.checkCancellation()
-                result = value; outcome = value.lines.isEmpty ? "empty" : "parsed-nonempty"
+                result = value.withSourceImage(request.intent.id); outcome = value.lines.isEmpty ? "empty" : "parsed-nonempty"
             } catch {
                 outcome = Task.isCancelled ? "cancelled" : "failed"
                 if !Task.isCancelled, provider == nil {
@@ -285,6 +285,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
             let generationCurrent=request.intent.generation == self.liveSession.generation
             let episodeCurrent=request.intent.episode == self.liveSession.episode
             let accepted = self.liveSession.complete(request,result:result,at:finished)
+            if accepted { self.sourceImages.insert(jpeg, for:request.intent.id) }
             self.inflight = false
             self.lastLatency = finished-request.startedAt
             var fields: [String:Any] = ["outcome":outcome,"acceptedReply":accepted,"acceptedAsHistory":accepted,
@@ -386,6 +387,8 @@ private final class VisionBaselineSession: @unchecked Sendable {
         }
     }
 
+    let sourceImages = RecognitionSourceStore()
+    let shareSession = RecognitionShareSession.shared
     let capture = CameraCapture()
     let account = SIWCController()
     var running = false
@@ -545,6 +548,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
     enum StopReason: String { case userPause = "user-pause", sceneInactive = "scene-inactive", sceneBackground = "scene-background", settings = "settings" }
     func stop(userInitiated: Bool = false, reason: StopReason = .sceneInactive) {
         if userInitiated { wantsRunning = false }
+        else { sourceImages.removeAll() }
         let stopReason = userInitiated ? StopReason.userPause.rawValue : reason.rawValue
         lastStopReason = stopReason; lastStopAt = ISO8601DateFormatter().string(from: Date())
         if inflight, work != nil, requestCancellationReason == nil {
@@ -695,7 +699,8 @@ private final class VisionBaselineSession: @unchecked Sendable {
                 self.resultFieldCounts = ["summaryCharacters": answer.summary.count,"names": answer.names.count, "text": answer.text.count, "barcodes": answer.barcodes.count]
                 self.matchedAtCompletion = self.currentTarget == request.target
                 self.completionDisposition = answer.lines.isEmpty ? "empty" : self.matchedAtCompletion ? "cached-current-target" : "cached-other-target"
-                self.state.complete(request, result: answer)
+                self.state.complete(request, result: answer.withSourceImage(request.id))
+                if !answer.lines.isEmpty { self.sourceImages.insert(jpeg, for:request.id) }
                 if !answer.lines.isEmpty { self.completedTargets.insert(request.target) }
                 self.lastLatency = self.timeNow() - now
                 self.diagnostic = "辨識完成 · \(String(format: "%.2f", self.lastLatency ?? 0)) 秒"
@@ -1720,6 +1725,7 @@ struct CameraView: View {
     @State private var model = CameraController()
     @State private var showingHistory = false
     private var records: [RecognitionHistory.Entry] { readingFixture?.records ?? model.sessionRecords }
+    private var sources: RecognitionSourceStore { readingFixture?.sources ?? model.sourceImages }
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
@@ -1753,7 +1759,7 @@ struct CameraView: View {
                             .font(.subheadline).accessibilityIdentifier("sessionHistoryButton")
                     }
                     if let result = readingFixture?.result ?? model.visible {
-                        RecognitionResultCard(result: result, isPrevious: readingFixture?.previous ?? model.showingPreviousResult, fixtureProbe: readingFixture?.probe)
+                        RecognitionResultCard(result: result, isPrevious: readingFixture?.previous ?? model.showingPreviousResult, sourceImages:sources, fixtureProbe: readingFixture?.probe)
                             // Content, not frame/request events, owns reading state.
                             // Identical answers and the previous label preserve scroll;
                             // a genuinely different answer starts at the top, collapsed.
@@ -1786,8 +1792,10 @@ struct CameraView: View {
                         }.navigationTitle("設定").toolbar { Button("完成") { model.showingSettings = false } }
                     }
                 }.onChange(of: model.showingSettings) { _, shown in model.settingsChanged(shown) }
-                .sheet(isPresented:$showingHistory) { RecognitionHistorySheet(records:records) }
-                .onChange(of: records.isEmpty) { _, empty in if empty { showingHistory=false } }
+                .sheet(isPresented:$showingHistory) { RecognitionHistorySheet(records:records,sourceImages:sources,fixtureProbe:readingFixture?.historyProbe) }
+                .onChange(of: records.isEmpty) { _, empty in if empty && !model.shareSession.active { showingHistory=false } }
+                .onChange(of: model.shareSession.active) { _, active in if !active && records.isEmpty { showingHistory=false } }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in if readingFixture == nil { model.sourceImages.removeAll() } }
                 .onChange(of: scenePhase) { _, phase in if readingFixture == nil { model.foreground(phase) } }
                 .task {
                     guard readingFixture == nil else { return }
@@ -1817,9 +1825,10 @@ struct RecognitionResultCard: View {
     let isPrevious: Bool
     @State private var originalExpanded: Bool
     let fixtureProbe: SummaryCardProbe?
+    let sourceImages: RecognitionSourceStore?
 
-    init(result: RecognitionResult, isPrevious: Bool, initiallyExpanded: Bool = false, fixtureProbe: SummaryCardProbe? = nil) {
-        self.result = result; self.isPrevious = isPrevious; self.fixtureProbe = fixtureProbe
+    init(result: RecognitionResult, isPrevious: Bool, initiallyExpanded: Bool = false, sourceImages: RecognitionSourceStore? = nil, fixtureProbe: SummaryCardProbe? = nil) {
+        self.result = result; self.isPrevious = isPrevious; self.fixtureProbe = fixtureProbe; self.sourceImages = sourceImages
         _originalExpanded = State(initialValue: initiallyExpanded)
     }
 
@@ -1838,6 +1847,7 @@ struct RecognitionResultCard: View {
                     Text(result.summary).font(.body).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled).accessibilityIdentifier("recognitionSummary")
                 }
+                shareActions.frame(maxWidth:.infinity,alignment:.leading)
                 if !result.text.isEmpty {
                     DisclosureGroup(isExpanded: $originalExpanded) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -1869,11 +1879,122 @@ struct RecognitionResultCard: View {
             }
             .onChange(of: originalExpanded) { _, expanded in fixtureProbe?.expanded = expanded }
     }
+    @ViewBuilder private var shareActions: some View {
+        RecognitionShareButton(text:result.shareText,image:{ sourceImages?.images.image(for:result.sourceImageID) },
+            imageAvailable:sourceImages?.images.image(for:result.sourceImageID) != nil,probe:fixtureProbe)
+            .fixedSize().frame(minWidth:44,minHeight:44)
+            .disabled(result.shareText.isEmpty && sourceImages?.images.image(for:result.sourceImageID) == nil)
+            .accessibilityIdentifier("shareRecognitionResult")
+    }
+}
+
+@MainActor @Observable final class RecognitionSourceStore {
+    private(set) var images = RecognitionSourceImages()
+    func insert(_ data:Data,for id:UUID) { images.insert(data,for:id) }
+    func removeAll() { images.removeAll() }
+}
+
+@MainActor @Observable final class RecognitionShareSession {
+    static let shared = RecognitionShareSession()
+    private(set) var active = false
+    private init() { RecognitionShareFile.removeOrphans() }
+    func begin() { active=true }
+    func finish() { active=false }
+}
+
+/// Completion owns the file even if the original result view disappears in the background.
+@MainActor final class RecognitionShareLifetime: NSObject, UIAdaptivePresentationControllerDelegate {
+    let file:RecognitionShareFile?
+    let didFinish:(() -> Void)?
+    private var finished=false
+    init(file:RecognitionShareFile?,didFinish:(() -> Void)?) { self.file=file;self.didFinish=didFinish }
+    func finish() {
+        guard !finished else { return };finished=true
+        file?.finish();RecognitionShareSession.shared.finish();didFinish?()
+    }
+    func presentationControllerDidDismiss(_ presentationController:UIPresentationController) { finish() }
+}
+@MainActor final class RecognitionActivityController:UIActivityViewController {
+    var lifetime:RecognitionShareLifetime?
+    override func viewDidDisappear(_ animated:Bool) {
+        super.viewDidDisappear(animated)
+        // Presenting an extension does not end the activity or delete its input.
+        if isBeingDismissed || presentingViewController == nil { lifetime?.finish() }
+    }
+}
+
+/// UIKit owns the standard share sheet and iPad anchor. No clipboard access.
+struct RecognitionShareButton: UIViewRepresentable {
+    var text:String
+    var image:(() -> Data?)? = nil
+    var imageAvailable=false
+    var probe:SummaryCardProbe? = nil
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context:Context) -> UIButton {
+        let button=UIButton(type:.system)
+        var configuration=UIButton.Configuration.plain()
+        configuration.image=UIImage(systemName:"square.and.arrow.up")
+        button.configuration=configuration
+        button.titleLabel?.font = .preferredFont(forTextStyle:.subheadline)
+        button.titleLabel?.adjustsFontForContentSizeCategory=true
+        button.addTarget(context.coordinator,action:#selector(Coordinator.share(_:)),for:.touchUpInside)
+        return button
+    }
+    func updateUIView(_ button:UIButton,context:Context) {
+        context.coordinator.value=self
+        button.configuration?.title=nil
+        button.accessibilityLabel="分享結果"
+        button.accessibilityHint=imageAvailable ? "來源圖片與完整文字，包含原文及條碼" : "來源圖片已無法取得，分享完整文字、原文與條碼"
+        button.accessibilityIdentifier="shareRecognitionResult"
+        button.isEnabled=imageAvailable || !text.isEmpty
+    }
+    @MainActor final class Coordinator:NSObject {
+        var value:RecognitionShareButton
+        init(_ value:RecognitionShareButton) { self.value=value }
+        @objc func share(_ button:UIButton) {
+            guard !RecognitionShareSession.shared.active else { return }
+            var responder:UIResponder?=button
+            while responder != nil && !(responder is UIViewController) { responder=responder?.next }
+            guard let presenter=responder as? UIViewController,presenter.presentedViewController == nil else { return }
+            var file:RecognitionShareFile?
+            var items:[Any]=[]
+            let text=value.text
+            do {
+                if let jpeg=value.image?() {
+                    let source=try RecognitionShareFile(jpeg:jpeg);file=source
+                    guard let image=UIImage(contentsOfFile:source.url.path) else { throw CocoaError(.fileReadCorruptFile) }
+                    items.append(image)
+                }
+                if !text.isEmpty { items.append(text) }
+                guard !items.isEmpty else { return }
+            } catch {
+                file?.finish()
+                let alert=UIAlertController(title:"無法準備來源圖片",message:"暫存檔建立失敗，請稍後再試。",preferredStyle:.alert)
+                alert.addAction(UIAlertAction(title:"好",style:.default));presenter.present(alert,animated:true);return
+            }
+            let lifetime=RecognitionShareLifetime(file:file,didFinish:value.probe?.shareFinished)
+            let probe=value.probe
+            let activity=RecognitionActivityController(activityItems:items,applicationActivities:nil)
+            activity.lifetime=lifetime
+            activity.completionWithItemsHandler={ kind,completed,_,_ in
+                lifetime.finish();probe?.activityCompleted?(kind?.rawValue,completed)
+            }
+            if let popover=activity.popoverPresentationController {
+                popover.sourceView=button;popover.sourceRect=button.bounds;popover.permittedArrowDirections=[.up,.down]
+            }
+            activity.presentationController?.delegate=lifetime
+            RecognitionShareSession.shared.begin()
+            presenter.present(activity,animated:true) {
+                probe?.combinedPresented?(text,file?.url,items.count)
+            }
+        }
+    }
 }
 
 /// A selected immutable entry keeps its reading position while new answers arrive.
 struct RecognitionHistorySheet: View {
     let records: [RecognitionHistory.Entry]
+    var sourceImages: RecognitionSourceStore? = nil
     var fixtureProbe: HistoryReadingProbe? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var selected: RecognitionHistory.Entry?
@@ -1896,7 +2017,7 @@ struct RecognitionHistorySheet: View {
             }.navigationTitle("本次紀錄").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement:.topBarTrailing) { Button("完成") { dismiss() } } }
                 .navigationDestination(item:$selected) { entry in
-                    RecognitionResultCard(result:entry.result,isPrevious:true,fixtureProbe:fixtureProbe?.card)
+                    RecognitionResultCard(result:entry.result,isPrevious:true,sourceImages:sourceImages,fixtureProbe:fixtureProbe?.card)
                         .id(entry.id).padding().navigationTitle("第 \(entry.sequence) 次辨識")
                         .navigationBarTitleDisplayMode(.inline)
                 }
@@ -1925,6 +2046,8 @@ struct RecognitionHistorySheet: View {
     var paused = false
     var records: [RecognitionHistory.Entry] = []
     let probe = SummaryCardProbe()
+    let historyProbe = HistoryReadingProbe()
+    let sources = RecognitionSourceStore()
     init(_ result: RecognitionResult) { self.result = result }
 }
 struct HistoryReadingFixtureHost:View {
@@ -1935,6 +2058,9 @@ struct HistoryReadingFixtureHost:View {
 @MainActor final class SummaryCardProbe {
     var toggleOriginal: (() -> Void)?
     var expanded = false
+    var combinedPresented: ((String,URL?,Int) -> Void)?
+    var activityCompleted: ((String?,Bool) -> Void)?
+    var shareFinished: (() -> Void)?
 }
 
 /// Runs only with an explicit engineering flag. All text and pixels are authored fixtures.

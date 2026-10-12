@@ -5,10 +5,62 @@ public struct RecognitionResult: Equatable, Hashable, Sendable {
     public let summary: String
     public let text: [String]
     public let barcodes: [String]
-    public init(names: [String] = [], summary: String = "", text: [String] = [], barcodes: [String] = []) {
+    public let sourceImageID: UUID?
+    public init(names: [String] = [], summary: String = "", text: [String] = [], barcodes: [String] = [], sourceImageID: UUID? = nil) {
         self.names = names; self.summary = summary.trimmingCharacters(in: .whitespacesAndNewlines); self.text = text; self.barcodes = barcodes
+        self.sourceImageID = sourceImageID
     }
+    public func withSourceImage(_ id: UUID) -> Self { .init(names:names,summary:summary,text:text,barcodes:barcodes,sourceImageID:id) }
     public var lines: [String] { (names + [summary] + text + barcodes).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+    /// Share only this immutable result, keeping existing text, Unicode and line breaks intact.
+    public var shareText: String {
+        let sections: [(String?, [String])] = [(nil, names), (nil, [summary]), ("原文", text), ("條碼", barcodes)]
+        return sections.compactMap { title, values in
+            let present = values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            guard !present.isEmpty else { return nil }
+            return (title.map { $0 + "\n" } ?? "") + present.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+    }
+}
+
+/// Text/history contain only an opaque ID. Original request bytes have separate bounded storage.
+public struct RecognitionSourceImages {
+    public let maximumCount: Int
+    public let maximumBytes: Int
+    private var images: [UUID:Data] = [:]
+    private var order: [UUID] = []
+    public private(set) var byteCount = 0
+    public var count: Int { images.count }
+    public init(maximumCount:Int = 12, maximumBytes:Int = 8 * 1024 * 1024) {
+        self.maximumCount=max(0,maximumCount);self.maximumBytes=max(0,maximumBytes)
+    }
+    public func image(for id:UUID?) -> Data? { id.flatMap { images[$0] } }
+    @discardableResult public mutating func insert(_ data:Data, for id:UUID) -> Bool {
+        guard images[id] == nil, !data.isEmpty, maximumCount > 0, data.count <= maximumBytes else { return false }
+        while count >= maximumCount || byteCount + data.count > maximumBytes {
+            let oldest=order.removeFirst();byteCount -= images.removeValue(forKey:oldest)!.count
+        }
+        images[id]=data;order.append(id);byteCount += data.count;return true
+    }
+    public mutating func removeAll() { images.removeAll();order.removeAll();byteCount=0 }
+}
+
+/// A user-initiated share owns one exact JPEG file until the system activity finishes.
+public final class RecognitionShareFile {
+    public static var directory: URL { FileManager.default.temporaryDirectory.appendingPathComponent("GlanceShareSources",isDirectory:true) }
+    public let url:URL
+    public init(jpeg:Data, directory:URL = RecognitionShareFile.directory) throws {
+        let folder=directory.appendingPathComponent(UUID().uuidString,isDirectory:true)
+        try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+        url=folder.appendingPathComponent("Glance-辨識來源.jpg")
+        do { try jpeg.write(to:url,options:.atomic) }
+        catch { try? FileManager.default.removeItem(at:folder);throw error }
+    }
+    public func finish() { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
+    /// Call once at process startup before creating any live shares, scoped to our own namespace.
+    public static func removeOrphans(directory:URL = RecognitionShareFile.directory) {
+        try? FileManager.default.removeItem(at:directory)
+    }
 }
 
 /// Target IDs are supplied by the on-device matcher; this core does not recognize images.
