@@ -1,0 +1,17 @@
+{
+  "version": "0.1.0",
+  "build": "28",
+  "sourceCommit": "ea0050846fef71e6385325de355080e7b2c27200",
+  "distribution": "ad-hoc",
+  "profileExpiresUTC": "2027-05-03T08:12:38+00:00",
+  "ipaSHA256": "3ce6ded3031a995f593e905b6485e380ae270eed59e6c5b5d30e43502bd5a8f8",
+  "exportedBinarySHA256": "97cca16e067be55ff7d01c535397f00458bc661b1f254e85e55fb5c6940e321e",
+  "sourcePublished": false,
+  "tagContents": "Installation website and distribution metadata only; GitHub source archives do not contain the app source.",
+  "rebuildNote": "Build28 source unchanged; compiler path remapping and release symbol stripping remove private build paths.",
+  "releaseURL": "https://github.com/peiyu66/Glance/releases/tag/build-28",
+  "installationURL": "https://peiyu66.github.io/Glance/",
+  "ipaURL": "https://github.com/peiyu66/Glance/releases/download/build-28/Glance-0.1.0-28.ipa",
+  "manifestURL": "https://github.com/peiyu66/Glance/releases/download/build-28/manifest.plist",
+  "physicalInstallationVerified": false
+}
