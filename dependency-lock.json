@@ -1,0 +1,17 @@
+{
+  "OpenCV": {
+    "version": "5.0.0",
+    "archiveURL": "https://github.com/opencv/opencv/releases/download/5.0.0/opencv-5.0.0-ios-framework.zip",
+    "archiveSHA256": "c844d3466f7999b6e920d4ee53c71310c4cdd34b13f1547f373723834e308b0e",
+    "prepareCommand": "python3 Scripts/prepare-opencv.py",
+    "reacquiredAndHashVerifiedOn": "2026-10-13"
+  },
+  "toolchain": {
+    "Xcode": "27.0 (27A266a)",
+    "Swift": "6.4",
+    "iOSSDK": "27.0",
+    "macOS": "27.0.1",
+    "CPU": "arm64"
+  },
+  "SwiftPackageDependencies": []
+}

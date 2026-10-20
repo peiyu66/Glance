@@ -340,20 +340,17 @@ private func fingerprint(_ variant: Int = 0) -> SceneFingerprint {
     let input = try #require(body["input"] as? [[String: Any]])
     let content = try #require(input.first?["content"] as? [[String: Any]])
     let prompt = try #require(content.first?["text"] as? String)
-    #expect(prompt.contains("Traditional Chinese as used in Taiwan (zh-Hant-TW)"))
-    #expect(prompt.contains("natural Taiwanese vocabulary"))
-    #expect(prompt.contains("verbatim in its original language and script"))
-    #expect(prompt.contains("do not translate or normalize it"))
-    #expect(prompt.contains("preserving all digits and leading zeros"))
-    #expect(prompt.contains("four keys: names (array of strings), summary (string), text (array of strings), barcodes (array of strings)"))
-    #expect(prompt.contains("No web lookup, outside facts"))
     #expect(body["model"] as? String == "gpt-6-luna")
     #expect(body["store"] as? Bool == false)
     #expect(body["stream"] as? Bool == true)
     #expect((body["reasoning"] as? [String: String])?["effort"] == "none")
+    #expect(input.count == 1 && input.first?["role"] as? String == "user")
+    #expect(CameraAnswer.promptRevision == "P20-English-concise-entity-zhTW1")
+    #expect(prompt == CameraAnswer.prompt)
+    #expect(content.last?["detail"] == nil)
     #expect(content.count == 2)
     #expect(content.last?["image_url"] as? String == "data:image/jpeg;base64,AQID")
-    #expect(Set(body.keys) == Set(["model", "reasoning", "store", "stream", "input"]))
+    #expect(Set(body.keys) == Set(["model", "reasoning", "store", "stream", "input", "text"]))
 }
 
 @Test func cameraAnswerPreservesSourceScriptBrandsModelsAndLeadingZeros() throws {
@@ -361,4 +358,21 @@ private func fingerprint(_ variant: Int = 0) -> SceneFingerprint {
     #expect(result.names == ["隨身碟"])
     #expect(result.text == ["包装文字", "Acme USB-C", "AB-001", "臺灣製造"])
     #expect(result.barcodes == ["0012345678905"])
+}
+
+@Test func conciseKnowledgePromptOmitsRoutineDisclaimersWithoutDeletingNecessaryUncertainty() throws {
+    // Contract checks do not claim model quality; verify the actual request and parser boundary.
+    let summary = "無法確認藥品身分，不宜依外觀判斷用法。"
+    let data = try JSONSerialization.data(withJSONObject: ["names": [], "summary": summary, "text": ["僅憑照片無法確認"], "barcodes": []])
+    let parsed = try CameraAnswer.parse(String(decoding: data, as: UTF8.self))
+    #expect(parsed.summary == summary)
+    #expect(parsed.text == ["僅憑照片無法確認"])
+}
+
+@Test func P6OmitsMissingInformationSemanticallyWithoutDeletingAnswers() throws {
+    let example = "可辨識名稱，但未顯示具體成分或容量"
+    // The parser must not erase a final sentence or mutate historical/model output.
+    let summary = "有依據的介紹。\(example)。身份仍不確定，請勿憑外觀服用。"
+    let data = try JSONSerialization.data(withJSONObject: ["names": ["合成範例"], "summary": summary, "text": [], "barcodes": []])
+    #expect(try CameraAnswer.parse(String(decoding: data, as: UTF8.self)).summary == summary)
 }

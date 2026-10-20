@@ -1,0 +1,3 @@
+// Shared by Debug and Release. Increment Build for each new delivered build.
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 61

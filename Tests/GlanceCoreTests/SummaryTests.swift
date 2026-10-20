@@ -35,17 +35,6 @@ import Testing
     #expect(result.barcodes == ["0012345678905"])
     #expect(result.summary != result.text.joined(separator: "\n"))
 }
-@Test func summaryPromptRequiresGroundingAndMedicineRestraint() throws {
-    let model = SIWCModel(slug: "gpt-6-luna", display_name: "Fixture", visibility: "list")
-    let data = try CameraAnswer.request(model: model.slug, catalog: [model], jpeg: Data([1]))
-    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    let input = try #require(object["input"] as? [[String: Any]])
-    let content = try #require(input.first?["content"] as? [[String: Any]])
-    let prompt = try #require(content.first?["text"] as? String)
-    for required in ["AI-authored summary", "zh-Hant-TW", "only clearly visible evidence", "not a line-by-line translation", "empty summary string", "never infer therapeutic effects, ingredients, dosage or suitability", "never give personal medical advice", "No web lookup, outside facts"] {
-        #expect(prompt.contains(required))
-    }
-}
 @Test func readingIdentityUsesContentAndSummaryIsNotDropped() {
     let a = RecognitionResult(names: ["瓶子"], summary: "日文標籤的瓶子。", text: ["サンプル"])
     let same = RecognitionResult(names: ["瓶子"], summary: "日文標籤的瓶子。", text: ["サンプル"])

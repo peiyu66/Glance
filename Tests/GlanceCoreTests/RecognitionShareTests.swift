@@ -5,30 +5,30 @@ import Testing
 @Test func shareIncludesOriginalWithoutTranslationOrTruncation() {
     let original = "雪芙蘭\nCREAM\r\n滋養霜　乳霜＋綿羊油\n日本語：保湿クリーム 🧴 e\u{301}"
     let value = RecognitionResult(names:["藍色乳霜罐","Blue jar"],summary:"這是乳霜罐。",text:[original,"  原樣保留  "],barcodes:["0012345678905"])
-    #expect(value.shareText == "藍色乳霜罐\nBlue jar\n\n這是乳霜罐。\n\n原文\n" + original + "\n  原樣保留  \n\n條碼\n0012345678905")
+    #expect(value.shareText == "藍色乳霜罐\nBlue jar\n\n這是乳霜罐。\n\n【原文】\n\n" + original + "\n  原樣保留  \n\n【條碼】\n\n0012345678905")
 }
 @Test func shareOmitsAbsentSectionsWithoutInventingOriginal() {
     #expect(RecognitionResult(summary:"只有簡介",text:["", " \n "]).shareText == "只有簡介")
     #expect(RecognitionResult().shareText.isEmpty)
-    #expect(RecognitionResult(barcodes:["00001"]).shareText == "條碼\n00001")
-    #expect(RecognitionResult(text:["原文內容"]).shareText == "原文\n原文內容")
+    #expect(RecognitionResult(barcodes:["00001"]).shareText == "【條碼】\n\n00001")
+    #expect(RecognitionResult(text:["原文內容"]).shareText == "【原文】\n\n原文內容")
     #expect(RecognitionResult(names:["名稱","簡介"],summary:"內容仍有名稱與簡介。").shareText == "名稱\n簡介\n\n內容仍有名稱與簡介。")
 }
 @Test func shareKeepsLongMultilingualTextAndLineBreaks() {
     let original = (0..<1200).map { "第\($0)行 日本語が/が 👩🏽‍🔬\tABC-001" }.joined(separator:"\r\n")
     let summary = String(repeating:"繁體中文解說。\n",count:300)
     let value = RecognitionResult(summary:summary,text:[original])
-    let expected = summary.trimmingCharacters(in:.whitespacesAndNewlines) + "\n\n原文\n" + original
+    let expected = summary.trimmingCharacters(in:.whitespacesAndNewlines) + "\n\n【原文】\n\n" + original
     #expect(Array(value.shareText.utf8) == Array(expected.utf8))
 }
 @Test func selectedHistoryShareRemainsIndependentOfNewResults() {
     let first = RecognitionHistory.Entry(id:.init(),sequence:1,capturedAt:0,completedAt:1,result:.init(names:["第一筆"],summary:"舊答案",text:["旧い原文"]))
-    var history = RecognitionHistory()
+    var history = RecognitionHistory(capacity:nil)
     let mutationOutcome1 = (history.insert(first));#expect(mutationOutcome1)
     let selected = history.entries[0], snapshot = selected.result.shareText
     let mutationOutcome2 = (history.insert(.init(id:.init(),sequence:2,capturedAt:2,completedAt:3,result:.init(names:["第二筆"],text:["別の原文"])) ));#expect(mutationOutcome2)
     #expect(selected.result.shareText == snapshot)
-    #expect(snapshot == "第一筆\n\n舊答案\n\n原文\n旧い原文")
+    #expect(snapshot == "第一筆\n\n舊答案\n\n【原文】\n\n旧い原文")
     #expect(history.latest?.result.shareText != snapshot)
 }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import Observation
 @preconcurrency import AVFoundation
 @preconcurrency import Vision
@@ -45,6 +46,118 @@ private final class VisionBaselineSession: @unchecked Sendable {
 }
 
 @MainActor @Observable final class CameraController {
+    /// Generated pixels, scripted scene fingerprints and real foreground ORB worker.
+    /// This does not claim Apple segmentation quality or start AVCaptureSession.
+    func runORBFixture() async {
+        guard ProcessInfo.processInfo.arguments.contains("--camera-orb-fixture") else { return }
+        var checks: [String: Bool] = [:], timings: [Double] = []
+        var errorCategory: String?
+        let width = 512
+        func bitmap(_ foreground: UInt64, _ background: UInt64) -> UIImage {
+            var fg = foreground, bg = background, bytes = [UInt8](repeating: 0, count: width * width * 3)
+            for y in 0..<width { for x in 0..<width { for c in 0..<3 {
+                let center = (128..<384).contains(x) && (128..<384).contains(y)
+                if center { fg = fg &* 6364136223846793005 &+ 1442695040888963407 }
+                else { bg = bg &* 6364136223846793005 &+ 1442695040888963407 }
+                bytes[(y * width + x) * 3 + c] = UInt8(truncatingIfNeeded: (center ? fg : bg) >> 32)
+            } } }
+            let provider = CGDataProvider(data: Data(bytes) as CFData)!
+            return UIImage(cgImage: CGImage(width: width, height: width, bitsPerComponent: 8, bitsPerPixel: 24, bytesPerRow: width * 3, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: 0), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!)
+        }
+        let images = ["A": bitmap(13,25), "A2": bitmap(13,77), "B": bitmap(89,25), "C": bitmap(171,25)]
+        var mask = [UInt8](repeating: 0, count: width * width)
+        for y in 128..<384 { for x in 128..<384 { mask[y * width + x] = 255 } }
+        let maskData = Data(mask)
+        func reset() async {
+            let old = work; stop(userInitiated: true)
+            fixtureWaiter?.resume(throwing: CancellationError()); fixtureWaiter = nil
+            await old?.value
+            liveSession = LiveRecognitionSession(); syncFixedReferences(); capture.resetLiveRegistration()
+            liveEvents = []; liveRequestLifecycles = []; liveEpisodeReasonCounts = [:]; liveFrameCount = 0
+            fixtureUsesWallClock = false; fixtureTime = 0; blocked = false; inflight = false
+            generation = UUID(); running = true; beginCaptureRun()
+            fixtureProvider = { [weak self] _ in
+                guard let self else { throw CancellationError() }
+                return try await withCheckedThrowingContinuation { self.fixtureWaiter = $0 }
+            }
+        }
+        func feed(_ key: String, _ time: Double) throws {
+            fixtureTime = time
+            let image = images[key]!, offset = key == "B" ? 3 : key == "C" ? 6 : 0
+            let fp = SceneFingerprint(rgb: (0..<192).map { (($0 / 3 + offset) % 11) < 5 ? 0.15 : 0.85 }, side: 8)
+            let identity = try capture.syntheticIdentity(image.pngData()!, mask: maskData, time: time)
+            timings.append(identity.milliseconds)
+            frame(CameraFrame(image: image.cgImage!, fingerprint: fp, feature: nil, time: time, identity: identity), generation: generation, stats: CaptureStatistics())
+        }
+        func stable(_ key: String, _ start: Double) throws {
+            for t in stride(from: start, through: start + 1, by: 0.25) { try feed(key, t) }
+        }
+        func waitForProvider() async {
+            for _ in 0..<30 { if fixtureWaiter != nil { return }; await Task.yield() }
+        }
+        func finish(_ name: String?, _ time: Double) async {
+            await waitForProvider(); fixtureTime = time
+            if let name { fixtureWaiter?.resume(returning: RecognitionResult(names: [name], summary: "台灣繁中合成解說：" + name)) }
+            else { fixtureWaiter?.resume(throwing: SIWCError.invalidResponse) }
+            fixtureWaiter = nil; await work?.value
+        }
+        do {
+            await reset(); try stable("A", 0); await finish("A", 1.1)
+            let aID = liveSession.history.latest?.id
+            try stable("B", 3); await finish("B", 4.1); try feed("A2", 6)
+            checks["ABA_reuses_A_from_original_snapshot"] = visible?.names == ["A"] && !showingPreviousResult && liveSession.sentCount == 2 && liveSession.history.entries.count == 2 && liveSession.visibleRequestID == aID
+            fixtureTime = 6.25; frame(nil, generation: generation, stats: CaptureStatistics())
+            checks["movement_preserves_paid_card"] = visible?.names == ["A"] && showingPreviousResult
+            try stable("C", 8); await finish("C", 9.1); try feed("A2", 11)
+            checks["at_budget_three_cache_still_reuses"] = liveSession.sentCount == 3 && visible?.names == ["A"] && !showingPreviousResult
+            memoryWarning()
+            checks["memory_keeps_history_budget_releases_features"] = liveSession.history.entries.count == 3 && liveSession.sentCount == 3 && visible?.names == ["A"] && showingPreviousResult && fixedReferenceFeatures.isEmpty
+            try feed("A", 12)
+            checks["worker_memory_clear_applied"] = liveLastFrame["referenceMatchCount"] as? Int == 0
+
+            await reset(); try stable("A", 0); await waitForProvider()
+            let pending = liveSession.inflightRequest, originalFeatures = pending.flatMap { fixedReferenceFeatures[$0.intent.id] }
+            try stable("B", 3); checks["B_waits_behind_A"] = liveSession.queuedIntent != nil && liveSession.sentCount == 1
+            try stable("A2", 5)
+            checks["pending_A_return_deduplicated"] = liveSession.queuedIntent == nil && liveSession.sentCount == 1 && visible == nil
+            await finish("A", 6.1); try feed("A2", 6.25); try feed("A2", 8)
+            checks["AAA_one_send_reference_never_updated"] = liveSession.sentCount == 1 && visible?.names == ["A"] && !showingPreviousResult && pending.flatMap { fixedReferenceFeatures[$0.intent.id] } === originalFeatures
+            checks["late_reply_bound_to_capture_not_return"] = liveSession.references.entries.first?.capturedAt == 1 && liveSession.history.latest?.capturedAt == 1
+            fixtureTime = 91; liveSession.expire(at: 91); syncLiveVisible(at: 91)
+            checks["TTL_keeps_answer_and_history"] = visible?.names == ["A"] && liveSession.history.entries.count == 1 && fixedReferenceFeatures.isEmpty && showingPreviousResult
+
+            await reset(); try stable("A", 0); await waitForProvider(); try stable("B", 3); try stable("C", 6)
+            await finish("A", 7.1); try feed("C", 7.25)
+            checks["latest_intent_uses_latest_C_snapshot"] = liveSession.inflightRequest?.snapshotCapturedAt == 7.25 && liveSession.sentCount == 2
+            await finish("C", 7.4); try feed("C", 7.5)
+            checks["late_A_history_and_C_result_both_saved"] = liveSession.history.entries.map { $0.result.names.first ?? "" } == ["A","C"] && visible?.names == ["C"]
+
+            await reset(); try stable("A", 0); await finish("A", 1.1); try stable("B", 3); await finish(nil, 4.1)
+            checks["failed_B_keeps_A_no_pending_reference"] = visible?.names == ["A"] && showingPreviousResult && liveSession.references.entries.count == 1 && liveSession.sentCount == 2
+            try stable("C", 6); await waitForProvider()
+            let old = work; stop(userInitiated: true)
+            checks["pause_zero_text_kept_transport_held"] = liveSession.sentCount == 0 && liveSession.history.entries.count == 1 && fixedReferenceFeatures.isEmpty && inflight && liveSession.inflightRequest != nil
+            fixtureWaiter?.resume(returning: RecognitionResult(names: ["OLD C"])); fixtureWaiter = nil; await old?.value
+            checks["cancelled_late_reply_never_revives"] = !inflight && liveSession.history.entries.count == 1 && liveSession.references.entries.isEmpty
+            running = true; try stable("B", 9); await finish("B", 10.1)
+            checks["restart_new_batch_global_sequence_history"] = liveSession.sentCount == 1 && liveSession.lifetimeSentCount == 4 && liveSession.history.entries.map(\.sequence) == [1,4]
+            settingsChanged(true)
+            checks["settings_clears_text_refs_keeps_budget"] = visible == nil && liveSession.references.entries.isEmpty && fixedReferenceFeatures.isEmpty && liveSession.sentCount == 1 && !running
+            checks["camera_session_never_started"] = !capture.session.isRunning
+
+            let blank = UIGraphicsImageRenderer(size: CGSize(width: 512, height: 512)).image { ctx in UIColor.black.setFill(); ctx.fill(CGRect(x:0,y:0,width:512,height:512)) }
+            let probe = capture.fixtureMaskProbe(blank.cgImage!, time: 101)
+            checks["Apple_blank_mask_no_whole_image_fallback"] = probe.features == nil && probe.matches.isEmpty && probe.milliseconds.isFinite && probe.milliseconds > 0
+            timings.append(probe.milliseconds)
+        } catch { errorCategory = String(describing: type(of: error)) }
+        let pending = work; stop(userInitiated: true)
+        fixtureWaiter?.resume(throwing: CancellationError()); fixtureWaiter = nil; await pending?.value
+        fixtureProvider = nil; fixtureTime = nil; fixtureUsesWallClock = false
+        let report: [String: Any] = ["fixture":"fixed-foreground-controller-worker", "revision":1, "complete":errorCategory == nil, "passed":errorCategory == nil && checks.count >= 18 && checks.values.allSatisfy { $0 }, "checks":checks, "errorCategory":errorCategory ?? "none", "cameraStarted":false, "networkRequests":0, "processID":ProcessInfo.processInfo.processIdentifier, "nativeProcessingMS":timings, "scope":"Generated textures and known synthetic masks through real OpenCV/serial worker/controller. Scene fingerprints scripted. Apple blank-mask failure path measured separately. No real camera or AI; not segmentation accuracy." ]
+        if let root = FileManager.default.urls(for:.documentDirectory,in:.userDomainMask).first, let data = try? JSONSerialization.data(withJSONObject: report,options:[.sortedKeys]) { try? data.write(to:root.appendingPathComponent("camera-orb-fixture.json"),options:.atomic) }
+        saveDiagnostic(phase:"orb-fixture-finished")
+    }
+
     /// Generated movie -> AVAssetReader BGRA -> production central crop/preparation/controller.
     /// No camera session or network is started by this diagnostic entry point.
     private func makeLiveMovie(micro: Bool, earlyReturn: Bool = false, combined: Bool = false, budgetReturn: Bool = false) async throws -> URL {
@@ -97,7 +210,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
             let latest=try await makeLiveMovie(micro:false,earlyReturn:true);movies.append(latest)
             let combined=try await makeLiveMovie(micro:true,combined:true);movies.append(combined)
             let budget=try await makeLiveMovie(micro:false,budgetReturn:true);movies.append(budget)
-            for (name,delay) in [("normal",0.1),("delayed-4",4.0),("delayed-8",8.0),("latest-queued",8.0),("micro",0.1),("combined-micro-8",8.0),("empty",0.1),("failed",0.1),("stop",8.0),("background",8.0),("retain-empty-B",0.1),("retain-failed-B",0.1),("retain-budget",0.1),("retained-stop",0.1),("retained-background",0.1)] {
+            for (name,delay) in [("normal",0.1),("delayed-4",4.0),("delayed-8",8.0),("latest-queued",8.0),("micro",0.1),("combined-micro-8",8.0),("empty",0.1),("failed",0.1),("stop",8.0),("background",8.0),("retain-empty-B",0.1),("retain-failed-B",0.1),("retain-budget",0.1),("retained-stop",0.1),("retained-background",0.1),("pause-budget",0.1),("pause-inflight",8.0)] {
                 let old=work;stop(userInitiated:true);await old?.value
                 capture.resetLiveRegistration();liveSession=LiveRecognitionSession();liveEvents=[];liveRequestLifecycles=[];liveEpisodeReasonCounts=[:];liveLastFrame=[:];liveFrameCount=0;liveMaximumAgeMS=0
                 fixtureUsesWallClock=true;fixtureTime=0;blocked=false;inflight=false
@@ -106,7 +219,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
                 fixtureProvider = { [weak self] jpeg in
                     guard let self,UIImage(data:jpeg) != nil else { throw SIWCError.invalidResponse }
                     let target=self.liveFixtureTarget
-                    let ordinal=self.liveSession.sentCount
+                    let ordinal=self.liveSession.lifetimeSentCount
                     let wait=ordinal==1 ? delay : (["retained-stop","retained-background"].contains(name) && ordinal==2 ? 8.0 : 0.1)
                     // Deliberately uncancellable transport exercises late return after stop.
                     await withCheckedContinuation { continuation in
@@ -125,7 +238,8 @@ private final class VisionBaselineSession: @unchecked Sendable {
                     return try CameraAnswer.parse(value)
                 }
                 let microCase=["micro","combined-micro-8","empty","failed"].contains(name)
-                let asset=AVURLAsset(url:name=="retain-budget" ? budget : name=="combined-micro-8" ? combined : microCase ? micro : name=="latest-queued" ? latest : normal)
+                let budgetMovie=["retain-budget","pause-budget"].contains(name)
+                let asset=AVURLAsset(url:budgetMovie ? budget : name=="combined-micro-8" ? combined : microCase ? micro : name=="latest-queued" ? latest : normal)
                 let tracks=try await asset.loadTracks(withMediaType:.video)
                 guard let track=tracks.first else { throw SIWCError.invalidResponse }
                 let reader=try AVAssetReader(asset:asset)
@@ -134,6 +248,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
                 guard reader.startReading() else { throw SIWCError.invalidResponse }
                 let context=CIContext(options:[.cacheIntermediates:false]),start=timeNow()
                 var samples:[[String:Any]]=[],index=0,wrongVisible=0,preparationFailures=0
+                var pauseChecks:[String:Bool]=[:],didPause=false
                 while reader.status == .reading {
                     let targetTime=start+Double(index)/4
                     if timeNow()<targetTime { try await Task.sleep(for:.seconds(targetTime-timeNow())) }
@@ -141,17 +256,35 @@ private final class VisionBaselineSession: @unchecked Sendable {
                     guard let sample=output.copyNextSampleBuffer(),let pixel=CMSampleBufferGetImageBuffer(sample) else { break }
                     let t=CMSampleBufferGetPresentationTimeStamp(sample).seconds
                     let returnAt: Double=name=="latest-queued" ? 5 : 11
-                    let moving = !microCase && ((t>=2 && t<3) || (t>=returnAt && t<returnAt+1) || (name=="retain-budget" && t>=15 && t<16))
-                    let target=moving ? "" : !microCase && ((t>=3 && t<returnAt) || (name=="retain-budget" && t>=16)) ? "B" : "A"
+                    let moving = !microCase && ((t>=2 && t<3) || (t>=returnAt && t<returnAt+1) || (budgetMovie && t>=15 && t<16))
+                    let target=moving ? "" : !microCase && ((t>=3 && t<returnAt) || (budgetMovie && t>=16)) ? "B" : "A"
                     liveFixtureTarget=target
                     var stats=CaptureStatistics();stats.frames=index+1;stats.samples=index+1
                     if let image=CameraCapture.centralImage(CIImage(cvPixelBuffer:pixel),context:context),let prepared=try? capture.prepareLiveFrame(image,time:captured) {
-                        stats.accepted=1;frame(prepared,generation:generation,stats:stats)
+                        stats.accepted=1
+                        if ProcessInfo.processInfo.arguments.contains("--camera-live-fixture-fallback") {
+                            // Exercise the original unknown/no-descriptor request path. Optical
+                            // extraction still runs above; positive reuse has its own ORB fixture.
+                            let unknown=FixedForegroundMatcher.Observation(features:nil,matches:[],evaluated:[],milliseconds:prepared.identity?.milliseconds ?? 0)
+                            frame(CameraFrame(image:prepared.image,fingerprint:prepared.fingerprint,feature:nil,time:prepared.time,registration:prepared.registration,identity:unknown),generation:generation,stats:stats)
+                        } else { frame(prepared,generation:generation,stats:stats) }
                     } else { preparationFailures += 1;frame(nil,generation:generation,stats:stats) }
                     let isWrong=visible != nil && !showingPreviousResult && (target.isEmpty || visible?.names.first != target)
                     if isWrong { wrongVisible += 1 }
                     samples.append(["movieAt":t,"capturedAt":captured,"processedAt":timeNow(),"expectedTarget":target,"moving":moving,"visible":visible != nil,"isPrevious":showingPreviousResult,"visibleMatchesCurrent":visible?.names.first == target,"wrongVisible":isWrong,"historyCount":liveSession.history.entries.count,"latestSuccessfulSequence":liveSession.history.latest?.sequence ?? 0,"adopted":liveSession.adoptedCount,"sent":liveSession.sentCount,"queued":liveSession.queuedIntent != nil,"gate":liveSession.gate,"geometry":liveLastFrame])
                     index += 1
+                    if !didPause && ((name=="pause-budget" && t>=14.5) || (name=="pause-inflight" && t>=1.5)) {
+                        didPause=true
+                        let records=liveSession.history.entries,sequence=liveSession.lifetimeSentCount,slot=liveSession.inflightRequest
+                        pauseChecks["beforePauseExpectedState"] = name=="pause-budget" ? liveSession.sentCount==3 && records.count==3 && slot==nil : liveSession.sentCount==1 && slot != nil
+                        stop(userInitiated:true)
+                        pauseChecks["pauseZeroAndHistoryPreserved"] = liveSession.sentCount==0 && liveTrialStatus=="已送 0/3" && liveSession.history.entries==records
+                        pauseChecks["pauseDoesNotReleaseTransport"] = liveSession.inflightRequest==slot
+                        stop(userInitiated:true)
+                        pauseChecks["repeatedPauseIsSafe"] = liveSession.sentCount==0 && liveSession.lifetimeSentCount==sequence && liveSession.history.entries==records
+                        running=true;beginCaptureRun()
+                        liveEvent("fixture-resumed-after-manual-pause",at:timeNow(),fields:["batchSent":liveSession.sentCount,"lifetimeSent":liveSession.lifetimeSentCount,"historyCount":liveSession.history.entries.count])
+                    }
                     if ["stop","background","retained-stop","retained-background"].contains(name),t>=4.5 {
                         let task=work
                         stop(userInitiated:name=="stop" || name=="retained-stop",reason:.sceneBackground)
@@ -160,7 +293,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
                 }
                 await work?.value
                 reports.append(["scenario":name,"firstResponseDelaySeconds":delay,"requests":requestCount-before,"wrongVisibleFrames":wrongVisible,
-                    "preparationFailures":preparationFailures,"readerStatus":reader.status.rawValue,"finalVisible":visible != nil,"summary":liveSummary(),"samples":samples])
+                    "pauseChecks":pauseChecks,"preparationFailures":preparationFailures,"readerStatus":reader.status.rawValue,"finalVisible":visible != nil,"summary":liveSummary(),"samples":samples])
                 // Checkpoint each completed case; a locked/terminated device does not lose prior evidence.
                 writeLiveFixture(reports,error:nil,complete:false)
             }
@@ -170,7 +303,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
         fixtureProvider=nil;fixtureTime=nil;fixtureUsesWallClock=false
     }
     private func writeLiveFixture(_ cases:[[String:Any]],error:String?,complete:Bool) {
-        var report:[String:Any]=["fixture":"live-current-video-controller","revision":4,"answerSchema":"names-summary-text-barcodes","displayPolicy":"all-active-successes-in-history-latest-by-request-pause-retains-background-clears","complete":complete,
+        var report:[String:Any]=["fixture":"live-current-video-controller","revision":6,"identityPolicy":ProcessInfo.processInfo.arguments.contains("--camera-live-fixture-fallback") ? "forced-unknown-fallback-after-full-extraction" : "fixed-foreground-orb","budgetPolicy":"manual-pause-resets-batch-global-sequence-preserved","answerSchema":"names-summary-text-barcodes","displayPolicy":"all-active-successes-in-history-latest-by-request-pause-retains-background-clears","complete":complete,
             "processID":ProcessInfo.processInfo.processIdentifier,"recordedAt":ISO8601DateFormatter().string(from:Date()),
             "networkRequests":0,"cameraStarted":false,"source":"generated H264 1080x1920 -> AVAssetReader BGRA -> central768 -> prepareLiveFrame/native-registration -> production frame/liveFrame -> SSE reader -> answer parse -> visible",
             "clock":"real monotonic, 4fps movie presentation pacing, continuous frames during delayed responses","cases":cases]
@@ -183,6 +316,17 @@ private final class VisionBaselineSession: @unchecked Sendable {
     private var cameraPipelineMode: CameraPipelineMode { .resolve(arguments: ProcessInfo.processInfo.arguments) }
     private var liveCurrentEnabled: Bool { cameraPipelineMode == .liveCurrent }
     private var liveSession = LiveRecognitionSession()
+    private var fixedReferenceFeatures: [UUID: ForegroundORBFeatures] = [:]
+    private var publishedReferenceIDs: Set<UUID> = []
+    private func syncFixedReferences() {
+        let ids = Set(liveSession.references.entries.map(\.id))
+        fixedReferenceFeatures = fixedReferenceFeatures.filter { ids.contains($0.key) }
+        guard ids != publishedReferenceIDs else { return }
+        publishedReferenceIDs = ids
+        capture.updateFixedReferences(liveSession.references.entries.compactMap { entry in
+            fixedReferenceFeatures[entry.id].map { .init(id: entry.id, capturedAt: entry.capturedAt, features: $0) }
+        })
+    }
     private var liveEvents: [[String: Any]] = []
     private var liveRequestLifecycles: [[String: Any]] = []
     private var liveEpisodeReasonCounts: [String:Int] = [:]
@@ -202,17 +346,18 @@ private final class VisionBaselineSession: @unchecked Sendable {
         liveEvents.append(event); liveEvents = Array(liveEvents.suffix(80))
     }
     private func liveSummary() -> [String: Any] {
-        ["gate":liveSession.gate, "adopted":liveSession.adoptedCount, "sent":liveSession.sentCount,
+        ["gate":liveSession.gate, "adopted":liveSession.adoptedCount, "sent":liveSession.sentCount,"lifetimeSent":liveSession.lifetimeSentCount,"budgetLabel":liveTrialStatus ?? "",
          "finished":liveSession.completedCount, "discarded":liveSession.discardedCount,
          "limit":liveSession.limit, "queued":liveSession.queuedIntent != nil, "inflight":liveSession.inflightRequest != nil,
          "visible":visible != nil, "visibleIsPrevious":showingPreviousResult, "frames":liveFrameCount, "maximumAgeMS":liveMaximumAgeMS,
          "events":liveEvents, "requestLifecycles":liveRequestLifecycles, "episodeReasonCounts":liveEpisodeReasonCounts,
          "lastFrame":liveLastFrame, "lastCompletionReason":liveSession.lastCompletionReason,
-         "displayEnabled":true, "cacheEnabled":false, "historyCount":liveSession.history.entries.count,
+         "displayEnabled":true, "cacheEnabled":true, "referenceCount":liveSession.references.entries.count, "pendingReferences":liveSession.references.entries.filter { $0.status == .pending }.count, "historyCount":liveSession.history.entries.count,
          "latestSuccessfulSequence":liveSession.history.latest?.sequence ?? 0,
          "history":liveSession.history.entries.map { ["sequence":$0.sequence,"names":$0.result.names.count,"summaryCharacters":$0.result.summary.count,"text":$0.result.text.count,"barcodes":$0.result.barcodes.count] }]
     }
     private func syncLiveVisible(at now: Double) {
+        syncFixedReferences()
         let next=liveSession.visible,previous=liveSession.visibleIsPrevious,nextID=liveSession.visibleRequestID
         if visible != next || liveDisplayedRequestID != nextID {
             let kind=next == nil ? "hidden" : visible == nil ? "visible" : "replaced"
@@ -231,11 +376,13 @@ private final class VisionBaselineSession: @unchecked Sendable {
         if let frame { liveMaximumAgeMS = max(liveMaximumAgeMS, (now-frame.time)*1000) }
         let previousEpisode = liveSession.episode
         let previousCapturedAt = liveSession.lastObservedAt
-        let adopted = liveSession.observe(frame?.fingerprint, capturedAt: frame?.time ?? now, now: now, sceneChangeReason: frame?.registration?.sceneChanged == true ? frame?.registration?.reason : nil)
+        let adopted = liveSession.observe(frame?.fingerprint, capturedAt: frame?.time ?? now, now: now, sceneChangeReason: frame?.registration?.sceneChanged == true ? frame?.registration?.reason : nil, matchingReferenceIDs: frame?.identity?.matches ?? [], evaluatedReferenceIDs: frame?.identity?.evaluated)
         liveLastFrame = ["capturedAt":frame?.time ?? now,"processedAt":now,"ageMS":frame.map { (now-$0.time)*1000 } ?? 0,
             "usable":frame != nil,"stableMS":liveSession.stableElapsed*1000,"gate":liveSession.gate]
         liveLastFrame["gapMS"] = previousCapturedAt.map { ((frame?.time ?? now)-$0)*1000 }
         liveLastFrame["distance"] = liveSession.lastDistance
+        liveLastFrame["foregroundORBMS"] = frame?.identity?.milliseconds
+        liveLastFrame["referenceMatchCount"] = frame?.identity?.matches.count
         if let registration=frame?.registration {
             liveLastFrame["registrationReason"]=registration.reason;liveLastFrame["registrationMS"]=registration.milliseconds
             liveLastFrame["registeredDistance"]=registration.distance;liveLastFrame["cornerMotionPixels"]=registration.maximumCornerMotion
@@ -249,30 +396,51 @@ private final class VisionBaselineSession: @unchecked Sendable {
         if let adopted { liveEvent("adopted", at: now, fields:["adoptedAt":adopted.adoptedAt,"ordinal":liveSession.adoptedCount,"transportBusy":inflight]) }
         syncLiveVisible(at: now); pipelineStage = "live-" + liveSession.gate
         defer { if now-lastDiagnosticAt >= 1 { lastDiagnosticAt=now;saveDiagnostic(phase:pipelineStage) } }
-        guard let frame, liveSession.queuedIntent != nil, !inflight, !blocked else { return }
+        guard !pauseIfCaptureTimeExpired(), let frame, liveSession.queuedIntent != nil, !inflight, !blocked else { return }
         let encodingStart = timeNow()
         let encoded = fixtureJPEGEncoder.map { $0(frame.image) } ?? UIImage(cgImage:frame.image).jpegData(compressionQuality:0.82)
         guard let jpeg = encoded, !jpeg.isEmpty else { liveSession.discardQueuedIntent(); return }
-        guard let request = liveSession.startRequest(snapshotCapturedAt:frame.time, at:timeNow()) else { return }
+        guard acceptsFrameFocus(frame) else { liveSession.interruptAcquisitionForFocus(); return }
+        guard !pauseIfCaptureTimeExpired(), let request = liveSession.startRequest(snapshotCapturedAt:frame.time, at:timeNow(), referenceAvailable:frame.identity?.features != nil) else { return }
+        if let features = frame.identity?.features { fixedReferenceFeatures[request.intent.id] = features }; syncFixedReferences()
         inflight = true; requestCount += 1; requestID = request.intent.id.uuidString
+        beginRecognitionPreview(id: request.intent.id, jpeg: jpeg)
         liveEvent("started", at:request.startedAt, fields:["adoptedAt":request.intent.adoptedAt,"snapshotCapturedAt":request.snapshotCapturedAt,
-            "startedAt":request.startedAt,"ordinal":liveSession.sentCount,"jpegBytes":jpeg.count,"imageWidth":frame.image.width,"imageHeight":frame.image.height,
+            "startedAt":request.startedAt,"ordinal":request.sequence,"batchOrdinal":request.batchSequence,"jpegBytes":jpeg.count,"imageWidth":frame.image.width,"imageHeight":frame.image.height,
             "encodingMS":(request.startedAt-encodingStart)*1000,"provider":fixtureProvider == nil ? "real-pro" : "offline-mock"])
-        let requestOrdinal=liveSession.sentCount
-        liveRequestLifecycles.append(["ordinal":requestOrdinal,"requestID":request.intent.id.uuidString,"episodeID":request.intent.episode.uuidString,"generationID":request.intent.generation.uuidString,"adoptedAt":request.intent.adoptedAt,
+        let requestOrdinal=request.sequence
+        liveRequestLifecycles.append(["ordinal":requestOrdinal,"batchOrdinal":request.batchSequence,"requestID":request.intent.id.uuidString,"episodeID":request.intent.episode.uuidString,"generationID":request.intent.generation.uuidString,"adoptedAt":request.intent.adoptedAt,
             "snapshotCapturedAt":request.snapshotCapturedAt,"startedAt":request.startedAt,"phase":"started"])
-        liveRequestLifecycles=Array(liveRequestLifecycles.suffix(3))
+        liveRequestLifecycles=Array(liveRequestLifecycles.suffix(12))
         let provider = fixtureProvider
+        let captureEpoch = generation
         work = Task { [weak self] in
             guard let self else { return }
             var result: RecognitionResult?
             var outcome = "failed"
+            var focusRejectedBeforeSend = false
+            let validateBeforeImageSend = {
+                try Task.checkCancellation()
+                guard self.running, self.generation == captureEpoch, !self.pauseIfCaptureTimeExpired() else { throw CancellationError() }
+                try self.requireFrameFocus(frame)
+            }
             do {
+                if self.pauseIfCaptureTimeExpired() { throw CancellationError() }
+                try Task.checkCancellation()
                 let value: RecognitionResult
-                if let provider { value = try await provider(jpeg) }
-                else { value = try await self.account.recognize(jpeg:jpeg,requestID:request.intent.id.uuidString) }
+                if let provider {
+                    await self.fixtureBeforeImageSend?()
+                    try validateBeforeImageSend()
+                    value = try await provider(jpeg)
+                } else { value = try await self.account.recognize(jpeg:jpeg,requestID:request.intent.id.uuidString,validateBeforeImageSend:validateBeforeImageSend) }
+                if self.pauseIfCaptureTimeExpired() { throw CancellationError() }
                 try Task.checkCancellation()
                 result = value.withSourceImage(request.intent.id); outcome = value.lines.isEmpty ? "empty" : "parsed-nonempty"
+            } catch is CameraFocusGate.Rejection {
+                focusRejectedBeforeSend = true; outcome = "focus-changed-before-image-send"
+                self.liveSession.releaseBeforeImageSend(request, at: self.timeNow())
+                self.requestCount = max(0, self.requestCount - 1)
+                self.focusBeforeSendRejections += 1
             } catch {
                 outcome = Task.isCancelled ? "cancelled" : "failed"
                 if !Task.isCancelled, provider == nil {
@@ -284,8 +452,9 @@ private final class VisionBaselineSession: @unchecked Sendable {
             let finished = self.timeNow()
             let generationCurrent=request.intent.generation == self.liveSession.generation
             let episodeCurrent=request.intent.episode == self.liveSession.episode
-            let accepted = self.liveSession.complete(request,result:result,at:finished)
+            let accepted = focusRejectedBeforeSend ? false : self.liveSession.complete(request,result:result,at:finished)
             if accepted { self.sourceImages.insert(jpeg, for:request.intent.id) }
+            self.finishRecognitionPreview(id: request.intent.id)
             self.inflight = false
             self.lastLatency = finished-request.startedAt
             var fields: [String:Any] = ["outcome":outcome,"acceptedReply":accepted,"acceptedAsHistory":accepted,
@@ -348,6 +517,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
         guard let jpeg = encoded, !jpeg.isEmpty else {
             firstCapture.releaseUnsent(ticket); countBranch("first-capture-jpeg-failed"); return
         }
+        guard acceptsFrameFocus(frame) else { firstCapture.releaseUnsent(ticket); return }
         guard firstCapture.markSent(ticket, at: timeNow()) else { countBranch("first-capture-aged-during-encoding"); return }
         requestCount += 1; inflight = true; pipelineStage = "first-capture-request-started"
         saveDiagnostic(phase: pipelineStage)
@@ -372,14 +542,23 @@ private final class VisionBaselineSession: @unchecked Sendable {
             }
             do {
                 let result: RecognitionResult
+                let validate = {
+                    try Task.checkCancellation()
+                    guard self.running, self.generation == epoch, !self.pauseIfCaptureTimeExpired() else { throw CancellationError() }
+                    try self.requireFrameFocus(frame)
+                }
+                try validate()
                 if let provider = self.fixtureProvider { result = try await provider(jpeg) }
-                else { result = try await self.account.recognize(jpeg: jpeg, requestID: ticket.id.uuidString) }
+                else { result = try await self.account.recognize(jpeg: jpeg, requestID: ticket.id.uuidString, validateBeforeImageSend: validate) }
                 try Task.checkCancellation()
                 guard self.generation == epoch, self.running else { event["outcome"] = "discarded-after-stop"; return }
                 event["outcome"] = result.lines.isEmpty ? "empty" : "parsed-nonempty"
                 event["fieldCounts"] = ["summaryCharacters":result.summary.count,"names":result.names.count,"text":result.text.count,"barcodes":result.barcodes.count]
                 self.diagnostic = "第一關回應完成，結果展示尚未驗收"
                 // Preserve the accepted first-stage baseline: display remains disabled in this mode.
+            } catch is CameraFocusGate.Rejection {
+                self.firstCapture.releaseBeforeImageSend(ticket); self.requestCount = max(0,self.requestCount-1)
+                self.focusBeforeSendRejections += 1; event["outcome"] = "focus-changed-before-image-send"
             } catch {
                 event["outcome"] = Task.isCancelled ? "cancelled" : "failed"
                 self.diagnostic = "第一關已停止"
@@ -390,10 +569,26 @@ private final class VisionBaselineSession: @unchecked Sendable {
     let sourceImages = RecognitionSourceStore()
     let shareSession = RecognitionShareSession.shared
     let capture = CameraCapture()
-    let account = SIWCController()
+    let account: SIWCController
+    private let captureClock: () -> TimeInterval
+    private let requestCameraAccess: () async -> Bool
+    private let beginCaptureOverride: ((UUID, Bool, Bool) -> Void)?
+    private let endCaptureOverride: (() -> Void)?
+    private var captureTimeLimit = CaptureTimeLimit()
+    private var startAttempt: UUID?
+    private var appIsActive = true
+    var captureTimeLimitStatus: String? { captureTimeLimit.expired ? "已取景5分鐘，自動暫停" : nil }
     var running = false
     var permissionDenied = false
     var visible: RecognitionResult?
+    private(set) var pendingRecognition: PendingRecognitionPreview?
+    private func beginRecognitionPreview(id: UUID, jpeg: Data) {
+        pendingRecognition = PendingRecognitionPreview(id: id, jpeg: jpeg)
+    }
+    private func finishRecognitionPreview(id: UUID) {
+        guard pendingRecognition?.id == id else { return }
+        pendingRecognition = nil
+    }
     var diagnostic = "尚未辨識"
     var requestCount = 0
     private let diagnosticRunID = UUID().uuidString
@@ -465,6 +660,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
     private var acquisitionTimes: [String: Double] = [:]
     private var fixtureTime: Double?
     private var fixtureProvider: ((Data) async throws -> RecognitionResult)?
+    private var fixtureBeforeImageSend: (() async -> Void)?
     private var fixtureWaiter: CheckedContinuation<RecognitionResult, Error>?
     private func timeNow() -> Double { fixtureUsesWallClock ? ProcessInfo.processInfo.systemUptime : fixtureTime ?? ProcessInfo.processInfo.systemUptime }
     private var returningCachedTarget = false
@@ -490,6 +686,8 @@ private final class VisionBaselineSession: @unchecked Sendable {
     private var state = RecognitionState()
     private var features: [String: VNFeaturePrintObservation] = [:]
     private var generation = UUID()
+    private var observedFocusRevision: UInt64?
+    private var focusBeforeSendRejections = 0
     private var work: Task<Void, Never>?
     private var inflight = false
     private var inflightTarget: String?
@@ -500,25 +698,71 @@ private final class VisionBaselineSession: @unchecked Sendable {
     private var targetSeenAt = 0.0
     private var lastFrameAt = 0.0
     private var watchdog: Task<Void, Never>?
-    init() {
+    init(account: SIWCController = SIWCController(), captureClock: @escaping () -> TimeInterval = CaptureContinuousTime.now,
+         requestCameraAccess: @escaping () async -> Bool = CameraController.cameraAccess,
+         beginCapture: ((UUID, Bool, Bool) -> Void)? = nil, endCapture: (() -> Void)? = nil) {
+        self.account = account; self.captureClock = captureClock; self.requestCameraAccess = requestCameraAccess
+        self.beginCaptureOverride = beginCapture; self.endCaptureOverride = endCapture
         account.load()
         capture.onFrame = { [weak self] frame, generation, stats in
             Task { @MainActor in self?.frame(frame, generation: generation, stats: stats) }
         }
         capture.onFailure = { [weak self] code in Task { @MainActor in self?.diagnostic = code } }
+        capture.onFocusChange = { [weak self] _, epoch in
+            Task { @MainActor in self?.focusChanged(generation: epoch) }
+        }
+    }
+    private func focusChanged(generation epoch: UUID) {
+        guard running, generation == epoch else { return }
+        // Read latest state, because actor-delivered notifications can be delayed.
+        let focus = capture.focusGate.snapshot
+        guard focus.session == epoch, focus.active, observedFocusRevision != focus.revision else { return }
+        observedFocusRevision = focus.revision
+        liveSession.interruptAcquisitionForFocus(); firstCapture.invalidate("focus-changed")
+        state.interruptAcquisitionForFocus()
+        currentTarget = nil; lastFingerprint = nil; lastRegionalText = nil
+        if liveCurrentEnabled { syncLiveVisible(at: timeNow()) }
+        pipelineStage = focus.adjusting ? "focus-adjusting" : "focus-awaiting-new-stability"
+    }
+    private func acceptsFrameFocus(_ frame: CameraFrame) -> Bool {
+        guard let stamp = frame.focusStamp else { return true } // Existing offline/engineering fixtures.
+        focusChanged(generation: generation)
+        guard capture.focusGate.allows(stamp) else { pipelineStage = "focus-stale-frame"; return false }
+        return true
+    }
+    private func requireFrameFocus(_ frame: CameraFrame) throws {
+        guard acceptsFrameFocus(frame) else { throw CameraFocusGate.Rejection.changedBeforeSend }
+    }
+    private static func cameraAccess() async -> Bool {
+        let authorization = AVCaptureDevice.authorizationStatus(for: .video)
+        if authorization == .authorized { return true }
+        if authorization == .notDetermined { return await AVCaptureDevice.requestAccess(for: .video) }
+        return false
+    }
+    var canStartCapture: Bool {
+        account.planAccessReady && !account.busy && !wantsRunning && startAttempt == nil && appIsActive && !showingSettings
     }
     func start() async {
-        guard account.authenticated, account.planEnabled, account.planOnlyConfirmed else { showingSettings = true; return }
-        let authorization = AVCaptureDevice.authorizationStatus(for: .video)
-        var granted = authorization == .authorized
-        if authorization == .notDetermined { granted = await AVCaptureDevice.requestAccess(for: .video) }
+        guard !wantsRunning, startAttempt == nil, appIsActive, !showingSettings else { return }
+        guard account.planAccessReady, !account.busy else { showingSettings = true; return }
+        let intent = UUID(); startAttempt = intent
+        defer { if startAttempt == intent { startAttempt = nil } }
+        let granted = await requestCameraAccess()
+        guard startAttempt == intent, appIsActive, !showingSettings, !Task.isCancelled else { return }
         guard granted else { permissionDenied = true; saveDiagnostic(phase: "camera-permission-denied"); return }
+        guard captureTimeLimit.begin(at: captureClock()) else { return }
         permissionDenied = false; blocked = false; wantsRunning = true; resume()
     }
+    @discardableResult private func pauseIfCaptureTimeExpired() -> Bool {
+        guard captureTimeLimit.expireIfNeeded(at: captureClock()) else { return false }
+        stop(reason: .durationLimit); return true
+    }
     private func resume() {
-        guard wantsRunning, !showingSettings, !running else { return }
+        guard !pauseIfCaptureTimeExpired(), wantsRunning, appIsActive, !showingSettings, !running else { return }
         beginCaptureRun()
-        generation = UUID(); running = true; lastFingerprint = nil; capture.start(generation: generation, firstCaptureOnly: firstCaptureEnabled || liveCurrentEnabled, liveCurrent: liveCurrentEnabled)
+        generation = UUID(); running = true; lastFingerprint = nil
+        if let beginCaptureOverride { beginCaptureOverride(generation, firstCaptureEnabled || liveCurrentEnabled, liveCurrentEnabled) }
+        else { capture.start(generation: generation, firstCaptureOnly: firstCaptureEnabled || liveCurrentEnabled, liveCurrent: liveCurrentEnabled) }
         lastFrameAt = timeNow()
         saveDiagnostic(phase: "camera-starting")
         watchdog?.cancel()
@@ -526,6 +770,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let self, !Task.isCancelled else { return }
+                guard !self.pauseIfCaptureTimeExpired() else { return }
                 if self.timeNow() - self.lastFrameAt > 0.75 {
                     if self.firstCaptureEnabled { self.firstCapture.invalidate("frame-timeout") }
                     if self.liveCurrentEnabled { self.liveSession.expire(at:self.timeNow()); self.syncLiveVisible(at:self.timeNow()) }
@@ -545,10 +790,14 @@ private final class VisionBaselineSession: @unchecked Sendable {
         localBranches = [:]; stableMaximumMS = 0; lastLabel = nil
         lastStableGate = "unobserved"; lastStableElapsedMS = 0; lastMatcherMS = 0; maximumMatcherMS = 0
     }
-    enum StopReason: String { case userPause = "user-pause", sceneInactive = "scene-inactive", sceneBackground = "scene-background", settings = "settings" }
+    enum StopReason: String { case userPause = "user-pause", durationLimit = "duration-limit", sceneInactive = "scene-inactive", sceneBackground = "scene-background", settings = "settings" }
     func stop(userInitiated: Bool = false, reason: StopReason = .sceneInactive) {
-        if userInitiated { wantsRunning = false }
+        startAttempt = nil
+        pendingRecognition = nil
+        let retainingPause = userInitiated || reason == .durationLimit
+        if retainingPause { wantsRunning = false }
         else { sourceImages.removeAll() }
+        if userInitiated { captureTimeLimit.manualPause() }
         let stopReason = userInitiated ? StopReason.userPause.rawValue : reason.rawValue
         lastStopReason = stopReason; lastStopAt = ISO8601DateFormatter().string(from: Date())
         if inflight, work != nil, requestCancellationReason == nil {
@@ -556,23 +805,44 @@ private final class VisionBaselineSession: @unchecked Sendable {
             requestCancellationMS = requestStartUptime.map { Int((ProcessInfo.processInfo.systemUptime - $0) * 1000) }
         }
         archiveCaptureRun(reason: stopReason)
-        generation = UUID(); running = false; capture.stop(); work?.cancel(); work = nil
+        generation = UUID(); running = false
+        capture.focusGate.stop(); observedFocusRevision = nil
+        if let endCaptureOverride { endCaptureOverride() } else { capture.stop() }
+        work?.cancel(); work = nil
         watchdog?.cancel(); watchdog = nil
         if firstCaptureEnabled { firstCapture.stop() }
-        if liveCurrentEnabled { capture.resetLiveRegistration();liveSession.stop(preservingHistory:userInitiated); liveEvent("stopped",at:timeNow(),fields:["reason":stopReason]) }
+        if liveCurrentEnabled { capture.resetLiveRegistration();liveSession.stop(preservingHistory:retainingPause,resetBudget:retainingPause); liveEvent("stopped",at:timeNow(),fields:["reason":stopReason]) }
         state.leaveForeground(); memory.clear(); features = [:]; if !liveCurrentEnabled { visible = nil }; currentTarget = nil; completedTargets = []; acquisitionTimes = [:]; knownTargets = []; lastFingerprint = nil; lastRegionalText = nil; lastResultEvidenceAllowed = false
         if liveCurrentEnabled { syncLiveVisible(at:timeNow()) }
         saveDiagnostic(phase: "paused")
         // Keep inflight true until the cancelled provider returns; never overlap old and new calls.
     }
+    func memoryWarning() {
+        pendingRecognition?.jpeg = nil
+        sourceImages.removeAll()
+        liveSession.purgeReferences(); syncLiveVisible(at: timeNow())
+        liveEvent("reference-memory-purge", at: timeNow(), fields: ["historyCount": liveSession.history.entries.count])
+        saveDiagnostic(phase: running ? "live-memory-purge" : "paused-memory-purge")
+    }
     func foreground(_ phase: ScenePhase) {
+        appIsActive = phase == .active
+        if pauseIfCaptureTimeExpired() { return }
         if phase == .active { resume() }
         else { stop(reason: phase == .background ? .sceneBackground : .sceneInactive) }
     }
-    func settingsChanged(_ shown: Bool) { if shown { stop(reason: .settings) } else { account.load(); resume() } }
+    func settingsChanged(_ shown: Bool) {
+        if pauseIfCaptureTimeExpired() { return }
+        if shown { stop(reason: .settings) } else { account.load(); resume() }
+    }
     private func frame(_ frame: CameraFrame?, generation: UUID, stats: CaptureStatistics) {
         guard running, self.generation == generation else { return }
+        guard !pauseIfCaptureTimeExpired() else { return }
         let now = timeNow(); lastFrameAt = now
+        focusChanged(generation: generation)
+        if capture.focusGate.snapshot.active && capture.focusGate.snapshot.adjusting {
+            captureStats = stats; pipelineStage = "focus-adjusting"; return
+        }
+        if let frame, !acceptsFrameFocus(frame) { captureStats = stats; return }
         if liveCurrentEnabled { captureStats = stats; liveFrame(frame,now:now); return }
         if firstCaptureEnabled { captureStats = stats; firstCaptureFrame(frame, now: now); return }
         captureStats = stats; lastResultEvidenceAllowed = false; lastFeatureDistance = nil; lastAlignedMotionDistance = nil; lastMotionAlignmentMS = 0
@@ -661,6 +931,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
             nextRequestAt = now + 1; pipelineStage = "jpeg-encoding-failed"; return
         }
         countBranch("jpeg-succeeded")
+        guard acceptsFrameFocus(frame) else { state.releaseUnsent(request); return }
         memory.bindResultEvidence(request.target, regional: frame.regionalText)
         acquisitionTimes[request.target] = targetSeenAt
         if requestID != nil { requestHistory.append(requestDiagnostic()); requestHistory = Array(requestHistory.suffix(4)) }
@@ -685,8 +956,14 @@ private final class VisionBaselineSession: @unchecked Sendable {
             }
             do {
                 let answer: RecognitionResult
+                let validate = {
+                    try Task.checkCancellation()
+                    guard self.running, self.generation == epoch, !self.pauseIfCaptureTimeExpired() else { throw CancellationError() }
+                    try self.requireFrameFocus(frame)
+                }
+                try validate()
                 if let provider = self.fixtureProvider { answer = try await provider(jpeg) }
-                else { answer = try await self.account.recognize(jpeg: jpeg, requestID: self.requestID) }
+                else { answer = try await self.account.recognize(jpeg: jpeg, requestID: self.requestID, validateBeforeImageSend: validate) }
                 guard !Task.isCancelled, self.generation == epoch, self.running else {
                     self.completionDisposition = "discarded-after-stop"; return
                 }
@@ -699,13 +976,18 @@ private final class VisionBaselineSession: @unchecked Sendable {
                 self.resultFieldCounts = ["summaryCharacters": answer.summary.count,"names": answer.names.count, "text": answer.text.count, "barcodes": answer.barcodes.count]
                 self.matchedAtCompletion = self.currentTarget == request.target
                 self.completionDisposition = answer.lines.isEmpty ? "empty" : self.matchedAtCompletion ? "cached-current-target" : "cached-other-target"
-                self.state.complete(request, result: answer.withSourceImage(request.id))
+                let boundAnswer = answer.withSourceImage(request.id)
+                self.state.complete(request, result: boundAnswer)
                 if !answer.lines.isEmpty { self.sourceImages.insert(jpeg, for:request.id) }
                 if !answer.lines.isEmpty { self.completedTargets.insert(request.target) }
                 self.lastLatency = self.timeNow() - now
                 self.diagnostic = "辨識完成 · \(String(format: "%.2f", self.lastLatency ?? 0)) 秒"
                 self.pipelineStage = "completed"
                 self.saveDiagnostic(phase: "completed")
+            } catch is CameraFocusGate.Rejection {
+                self.state.releaseUnsent(request); self.requestCount = max(0,self.requestCount-1)
+                self.focusBeforeSendRejections += 1; self.nextRequestAt = 0
+                self.completionDisposition = "focus-changed-before-image-send"
             } catch {
                 guard self.generation == epoch, !Task.isCancelled else {
                     self.completionDisposition = "cancelled-after-stop"; return
@@ -1087,7 +1369,7 @@ private final class VisionBaselineSession: @unchecked Sendable {
         let requested = args.contains(real ? "--camera-first-capture-generated-real" : "--camera-first-capture-generated-check")
         guard requested, requestCount == 0 else { return }
         stop(userInitiated:true)
-        let planReady = account.authenticated && account.planEnabled && account.planOnlyConfirmed
+        let planReady = account.planAccessReady
         var samples: [[String:Any]] = []
         var preparationFailures = 0
         let started = ProcessInfo.processInfo.systemUptime
@@ -1664,6 +1946,11 @@ private final class VisionBaselineSession: @unchecked Sendable {
             value["request"] = ["phase": "preparing-or-unavailable", "cameraRequestID": requestID]
         }
         value["schemaVersion"] = 5
+        value["accountRevision"] = SIWCController.accountRevision
+        value["captureLimitRevision"] = "T1"
+        value["captureLimitSeconds"] = CaptureTimeLimit.seconds
+        value["captureLimitExpired"] = captureTimeLimit.expired
+        value["captureLimitArmed"] = captureTimeLimit.deadline != nil
         if firstCaptureEnabled { value["firstCapture"] = firstCaptureSummary() }
         if liveCurrentEnabled { value["liveCurrent"] = liveSummary() }
         value["regionalResultEvidenceAllowed"] = lastResultEvidenceAllowed
@@ -1690,14 +1977,30 @@ private final class VisionBaselineSession: @unchecked Sendable {
                 "completionDisposition":latest["completionReason"] ?? "pending","phase":latest["phase"] ?? "pending"]
         }
         value["authenticated"] = account.authenticated; value["planEnabled"] = account.planEnabled
-        value["planOnlyConfirmed"] = account.planOnlyConfirmed
+        value["legacyPlanOnlyConfirmed"] = account.account?.planOnlyConfirmed == true
+        value["usageWarningRevision"] = SIWCController.usageWarningRevision
+        value["cameraPromptRevision"] = CameraAnswer.promptRevision
+        value["focusRevision"] = "F1"
+        let focus = capture.focusGate.snapshot
+        value["focus"] = ["active":focus.active,"adjusting":focus.adjusting,"autofocusSupported":focus.autofocusSupported,
+            "generation":focus.revision,"changedAtHostTime":focus.changedAt,"rejectedSamples":captureStats.focusRejected,
+            "beforeSendRejections":focusBeforeSendRejections] as [String:Any]
+        value["continuousAutoFocusSupported"] = captureStats.continuousAutoFocusSupported
+        value["focusModeBefore"] = captureStats.focusModeBefore
+        value["focusModeActive"] = captureStats.focusModeActive
+        value["shareRevision"] = "R2"
+        value["sourceImageCount"] = sourceImages.images.count
+        value["sourceImageBytes"] = sourceImages.images.byteCount
+        value["planConfirmationRequired"] = false
+        value["canStartCapture"] = canStartCapture
         value["captureRun"] = captureRun
         value["counterScopes"] = ["frames/samples/eligible/quality/saliency/vision": "capture-run", "motionRejected/targetChanges/newTargets/requestCount/completedCount/displayCount": "controller-run"]
         value["captureRunCounters"] = ["motionRejected": captureRunMotionRejected, "targetChanges": captureRunTargetChanges, "newTargets": captureRunNewTargets]
         value["lastStopReason"] = lastStopReason; value["lastStopAt"] = lastStopAt
         value["pipelineStage"] = pipelineStage
         value["cameraAuthorization"] = AVCaptureDevice.authorizationStatus(for: .video).rawValue
-        value["cameraRunning"] = running
+        value["cameraRunning"] = capture.session.isRunning
+        value["controllerRunning"] = running
         value["frames"] = captureStats.frames; value["samples"] = captureStats.samples
         value["localProcessingMS"] = captureStats.localProcessingMS
         value["targetCropFraction"] = captureStats.targetCropFraction; value["targetTextBoxes"] = captureStats.targetTextBoxes; value["targetBarcodeBoxes"] = captureStats.targetBarcodeBoxes
@@ -1722,8 +2025,12 @@ private final class VisionBaselineSession: @unchecked Sendable {
 
 struct CameraView: View {
     var readingFixture: SummaryReadingFixtureState? = nil
-    @State private var model = CameraController()
+    @State private var model: CameraController
+    init(readingFixture: SummaryReadingFixtureState? = nil, model: CameraController = CameraController()) {
+        self.readingFixture = readingFixture; _model = State(initialValue: model)
+    }
     @State private var showingHistory = false
+    @State private var enlargedImage: RecognitionImageSnapshot?
     private var records: [RecognitionHistory.Entry] { readingFixture?.records ?? model.sessionRecords }
     private var sources: RecognitionSourceStore { readingFixture?.sources ?? model.sourceImages }
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -1733,7 +2040,8 @@ struct CameraView: View {
             GeometryReader { geometry in
                 // Reserve reading space on small phones and with accessibility fonts.
                 let readingPaused = (readingFixture?.paused ?? !model.running) && !records.isEmpty
-                let previewSide = min(geometry.size.width, geometry.size.height * (readingPaused ? 0.16 : dynamicTypeSize.isAccessibilitySize ? 0.28 : 0.46))
+                let hasCard = (readingFixture?.result ?? model.visible) != nil || (readingFixture?.pending ?? model.pendingRecognition) != nil
+                let previewSide = min(geometry.size.width, geometry.size.height * (readingPaused ? 0.16 : dynamicTypeSize.isAccessibilitySize ? 0.22 : hasCard ? 0.30 : 0.46))
                 VStack(spacing: 12) {
                     ZStack {
                         if readingFixture != nil { Color.black; Text("合成閱讀測試").foregroundStyle(.white).font(.caption) }
@@ -1742,9 +2050,13 @@ struct CameraView: View {
                         Rectangle().stroke(.white.opacity(0.75), style: StrokeStyle(lineWidth: 1.5, dash: [12, 6]))
                             .frame(width: previewSide * 0.78, height: previewSide * 0.78)
                     }.frame(width: previewSide, height: previewSide).clipped().frame(maxWidth: .infinity)
+                    if let status = model.captureTimeLimitStatus {
+                        Text(status).font(.footnote).fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("captureTimeLimitStatus")
+                    }
                     if readingFixture?.paused ?? !model.running {
                         if records.isEmpty {
-                        Text(dynamicTypeSize.isAccessibilitySize ? "對準物品後開始取景。" : "對準安全可拍的物品，中央穩定約一秒後送出單張辨識。影像經 ChatGPT 方案處理，不儲存照片。").font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+                        Text(dynamicTypeSize.isAccessibilitySize ? "對準物品後開始取景。" : "對準安全可拍的物品，中央穩定約一秒後送出單張辨識。影像經 ChatGPT 方案處理；來源圖片僅於本次工作暫存。").font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
                         }
                         Button(model.permissionDenied ? "在系統設定允許相機" : "開始取景") {
                             if readingFixture != nil { return }
@@ -1758,8 +2070,11 @@ struct CameraView: View {
                         Button("本次紀錄 \(records.count)") { showingHistory=true }
                             .font(.subheadline).accessibilityIdentifier("sessionHistoryButton")
                     }
+                    if let pending = readingFixture?.pending ?? model.pendingRecognition {
+                        RecognitionWaitingCard(preview: pending, onOpenImage: { enlargedImage = $0 }).padding(.horizontal)
+                    }
                     if let result = readingFixture?.result ?? model.visible {
-                        RecognitionResultCard(result: result, isPrevious: readingFixture?.previous ?? model.showingPreviousResult, sourceImages:sources, fixtureProbe: readingFixture?.probe)
+                        RecognitionResultCard(result: result, isPrevious: readingFixture?.previous ?? model.showingPreviousResult, sourceImages:sources, fixtureProbe: readingFixture?.probe, onOpenImage: { enlargedImage = $0; readingFixture?.probe.imagePresented?($0.jpeg) })
                             // Content, not frame/request events, owns reading state.
                             // Identical answers and the previous label preserve scroll;
                             // a genuinely different answer starts at the top, collapsed.
@@ -1778,28 +2093,34 @@ struct CameraView: View {
                         Form {
                             Section("ChatGPT") {
                                 Label(model.account.authenticated ? "已登入，使用保存的會話" : "尚未登入", systemImage: "person.crop.circle")
-                                Text("辨識固定使用 gpt-6-luna · none。方案不足即停止，不切換其他模型或API。官方額外點數設定不會由此App更改。").font(.footnote)
+                                Text("辨識固定使用 gpt-6-luna · none。方案不足即停止，不切換其他模型或 API。").font(.footnote)
                                 NavigationLink("帳戶與權限") { SIWCView() }
                             }
                             Section("本次診斷") {
                                 Text(model.diagnostic).textSelection(.enabled)
-                                Text("已送出 \(model.requestCount) 張")
+                                Text("累計送出 \(model.requestCount) 次")
+                                if let budget=model.liveTrialStatus { Text("本批："+budget+"；手動暫停後清零") }
                                 if let latency = model.firstResultLatency { Text("目標進入到首次顯示：\(String(format: "%.2f", latency)) 秒") }
                                 if let latency = model.lastLatency { Text("上次請求到完成：\(String(format: "%.2f", latency)) 秒") }
                                 if let latency = model.cacheLatency { Text("回看穩定到顯示：\(String(format: "%.2f", latency)) 秒") }
-                                Text("辨識中的等待、失敗或查無不在取景畫面顯示。手動暫停保留本次紀錄，背景／設定清除。門檻仍待實機校準。").font(.footnote)
+                                Text("辨識中會顯示來源縮圖與等待提示；失敗或查無不新增結果卡。手動暫停保留本次紀錄，背景／設定清除。門檻仍待實機校準。").font(.footnote)
                             }
                         }.navigationTitle("設定").toolbar { Button("完成") { model.showingSettings = false } }
                     }
                 }.onChange(of: model.showingSettings) { _, shown in model.settingsChanged(shown) }
+                .sheet(item: $enlargedImage) { RecognitionImageViewer(snapshot: $0) }
                 .sheet(isPresented:$showingHistory) { RecognitionHistorySheet(records:records,sourceImages:sources,fixtureProbe:readingFixture?.historyProbe) }
                 .onChange(of: records.isEmpty) { _, empty in if empty && !model.shareSession.active { showingHistory=false } }
                 .onChange(of: model.shareSession.active) { _, active in if !active && records.isEmpty { showingHistory=false } }
-                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in if readingFixture == nil { model.sourceImages.removeAll() } }
-                .onChange(of: scenePhase) { _, phase in if readingFixture == nil { model.foreground(phase) } }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase != .active { enlargedImage = nil }
+                    if readingFixture == nil { model.foreground(phase) }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in if readingFixture == nil { model.memoryWarning() } }
                 .task {
                     guard readingFixture == nil else { return }
-                    if ProcessInfo.processInfo.arguments.contains("--camera-live-fixture") { await model.runLiveFixture() }
+                    if ProcessInfo.processInfo.arguments.contains("--camera-orb-fixture") { await model.runORBFixture() }
+                    else if ProcessInfo.processInfo.arguments.contains("--camera-live-fixture") { await model.runLiveFixture() }
                     else if ProcessInfo.processInfo.arguments.contains("--camera-vision-baseline") { await model.runOfficialVisionBaseline() }
                     else if ProcessInfo.processInfo.arguments.contains("--camera-geometry-profile") { await model.runGeometryProfile() }
                     else if ProcessInfo.processInfo.arguments.contains("--camera-current-image-fixture") { await model.runCurrentImageFixture() }
@@ -1823,16 +2144,27 @@ struct CameraView: View {
 struct RecognitionResultCard: View {
     let result: RecognitionResult
     let isPrevious: Bool
+    @Environment(\.dynamicTypeSize) private var sharingTypeSize
     @State private var originalExpanded: Bool
     let fixtureProbe: SummaryCardProbe?
     let sourceImages: RecognitionSourceStore?
+    let onOpenImage: ((RecognitionImageSnapshot) -> Void)?
 
-    init(result: RecognitionResult, isPrevious: Bool, initiallyExpanded: Bool = false, sourceImages: RecognitionSourceStore? = nil, fixtureProbe: SummaryCardProbe? = nil) {
-        self.result = result; self.isPrevious = isPrevious; self.fixtureProbe = fixtureProbe; self.sourceImages = sourceImages
+    init(result: RecognitionResult, isPrevious: Bool, initiallyExpanded: Bool = false, sourceImages: RecognitionSourceStore? = nil, fixtureProbe: SummaryCardProbe? = nil, onOpenImage: ((RecognitionImageSnapshot) -> Void)? = nil) {
+        self.result = result; self.isPrevious = isPrevious; self.fixtureProbe = fixtureProbe; self.sourceImages = sourceImages; self.onOpenImage = onOpenImage
         _originalExpanded = State(initialValue: initiallyExpanded)
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let id = result.sourceImageID, let jpeg = sourceImages?.images.image(for: id) {
+                HStack {
+                    RecognitionSourceThumbnail(snapshot: .init(id: id, jpeg: jpeg), onOpenImage: onOpenImage)
+                    Text("辨識來源").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    shareActions
+                }.padding([.horizontal, .top]).padding(.bottom, 8)
+            }
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 12) {
                 if isPrevious {
@@ -1847,7 +2179,9 @@ struct RecognitionResultCard: View {
                     Text(result.summary).font(.body).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled).accessibilityIdentifier("recognitionSummary")
                 }
-                shareActions.frame(maxWidth:.infinity,alignment:.leading)
+                if sourceImages?.images.image(for: result.sourceImageID) == nil {
+                    shareActions.frame(maxWidth:.infinity,alignment:.leading)
+                }
                 if !result.text.isEmpty {
                     DisclosureGroup(isExpanded: $originalExpanded) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -1862,7 +2196,7 @@ struct RecognitionResultCard: View {
                 }
                 if !result.barcodes.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("條碼").font(.caption).foregroundStyle(.secondary)
+                        Text("【條碼】").font(.caption).foregroundStyle(.secondary)
                         ForEach(Array(result.barcodes.enumerated()), id: \.offset) { _, barcode in
                             Text(barcode).font(.body.monospacedDigit())
                                 .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
@@ -1871,8 +2205,9 @@ struct RecognitionResultCard: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding()
         }.scrollIndicators(.visible).scrollBounceBehavior(.basedOnSize)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
             .accessibilityIdentifier("recognitionResult")
+        }
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
             .onAppear {
                 fixtureProbe?.expanded = originalExpanded
                 fixtureProbe?.toggleOriginal = { originalExpanded.toggle() }
@@ -1885,6 +2220,93 @@ struct RecognitionResultCard: View {
             .fixedSize().frame(minWidth:44,minHeight:44)
             .disabled(result.shareText.isEmpty && sourceImages?.images.image(for:result.sourceImageID) == nil)
             .accessibilityIdentifier("shareRecognitionResult")
+    }
+}
+
+struct PendingRecognitionPreview: Identifiable {
+    let id: UUID
+    var jpeg: Data?
+}
+
+struct RecognitionImageSnapshot: Identifiable {
+    let id: UUID
+    let jpeg: Data
+    var allowsImageSharing = false
+}
+
+struct RecognitionSourceThumbnail: View {
+    let snapshot: RecognitionImageSnapshot
+    var onOpenImage: ((RecognitionImageSnapshot) -> Void)? = nil
+    @State private var enlarged: RecognitionImageSnapshot?
+    var body: some View {
+        Button { if let onOpenImage { onOpenImage(snapshot) } else { enlarged = snapshot } } label: {
+            if let image = UIImage(data: snapshot.jpeg) {
+                Image(uiImage: image).resizable().scaledToFit()
+                    .frame(width: 64, height: 64)
+                    .background(.black.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }.buttonStyle(.plain)
+            .accessibilityLabel("放大辨識來源圖片")
+            .accessibilityIdentifier("recognitionSourceThumbnail")
+            .sheet(item: $enlarged) { RecognitionImageViewer(snapshot: $0) }
+    }
+}
+
+struct RecognitionImageViewer: View {
+    let snapshot: RecognitionImageSnapshot
+    var shareProbe: SummaryCardProbe? = nil
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let image = UIImage(data: snapshot.jpeg) {
+                    Image(uiImage: image).resizable().scaledToFit().padding()
+                        .accessibilityLabel("辨識來源圖片")
+                        .accessibilityValue(snapshot.id.uuidString)
+                        .accessibilityIdentifier("recognitionSourceEnlarged")
+                } else {
+                    ContentUnavailableView("無法讀取這張圖片", systemImage: "photo.badge.exclamationmark")
+                        .accessibilityIdentifier("recognitionSourceUnavailable")
+                }
+            }
+            .navigationTitle("辨識來源").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if snapshot.allowsImageSharing, UIImage(data: snapshot.jpeg) != nil {
+                        RecognitionShareButton(text: "", imageAvailable: true, probe: shareProbe,
+                            snapshot: { .init(text: "", jpeg: snapshot.jpeg) }, imageOnly: true)
+                            .frame(width: 44, height: 44)
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }.accessibilityIdentifier("closeRecognitionImage")
+                }
+            }
+        }
+    }
+}
+
+private struct RecognitionWaitingCard: View {
+    let preview: PendingRecognitionPreview
+    let onOpenImage: (RecognitionImageSnapshot) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        HStack(spacing: 12) {
+            if let jpeg = preview.jpeg {
+                RecognitionSourceThumbnail(snapshot: .init(id: preview.id, jpeg: jpeg), onOpenImage: onOpenImage)
+            }
+            Text("辨識中").font(.subheadline).accessibilityIdentifier("recognitionWaiting")
+            TimelineView(.animation(minimumInterval: 0.35, paused: reduceMotion)) { timeline in
+                let phase = Int(timeline.date.timeIntervalSinceReferenceDate / 0.35) % 3
+                HStack(spacing: 5) {
+                    ForEach(0..<3) { index in
+                        Circle().fill(.secondary.opacity(reduceMotion || phase == index ? 0.85 : 0.25))
+                            .frame(width: 5, height: 5)
+                    }
+                }
+            }.accessibilityHidden(true)
+            Spacer(minLength: 0)
+        }.padding(12).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -1923,12 +2345,66 @@ struct RecognitionResultCard: View {
     }
 }
 
-/// UIKit owns the standard share sheet and iPad anchor. No clipboard access.
+/// UIKit owns the standard share sheet and iPad anchor.
+struct RecognitionShareContent {
+    let text: String
+    let jpeg: Data?
+    var document: RecognitionShareDocument? = nil
+}
+
+/// Providers keep all text representations on one item; the image remains independent.
+@MainActor enum RecognitionShareProviders {
+    static func textRepresentations(_ document: RecognitionShareDocument) -> [String: Any] {
+        var representations: [String: Any] = [UTType.html.identifier: Data(document.html.utf8),
+            UTType.utf8PlainText.identifier: document.plainText]
+        let attributed = NSMutableAttributedString(string: document.body)
+        for link in document.links {
+            if attributed.length > 0 { attributed.append(NSAttributedString(string: "\n\n")) }
+            attributed.append(NSAttributedString(string: link.label, attributes: [.link: link.url]))
+        }
+        if let rtf = try? attributed.data(from: NSRange(location: 0, length: attributed.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
+            representations[UTType.rtf.identifier] = rtf
+        }
+        return representations
+    }
+    static func text(_ document: RecognitionShareDocument) -> NSItemProvider { text(textRepresentations(document)) }
+    static func text(_ representations: [String: Any]) -> NSItemProvider {
+        let provider = NSItemProvider()
+        // Higher fidelity first. Share destinations choose their representation.
+        for type in [UTType.rtf.identifier, UTType.html.identifier] {
+            if let data = representations[type] as? Data {
+                provider.registerDataRepresentation(forTypeIdentifier: type, visibility: .all) { completion in completion(data, nil); return nil }
+            }
+        }
+        if let plain = representations[UTType.utf8PlainText.identifier] as? String {
+            provider.registerObject(plain as NSString, visibility: .all)
+        }
+        return provider
+    }
+    /// Only a successful explicit system Copy replaces its own generated clipboard.
+    /// Never reads the clipboard; the immutable items were prepared at the share tap.
+    static func finishCopy(kind: UIActivity.ActivityType?, completed: Bool, error: Error?, items: [[String: Any]],
+                           write: ([[String: Any]]) -> Void = { UIPasteboard.general.items = $0 }) {
+        guard kind == .copyToPasteboard, completed, error == nil, !items.isEmpty else { return }
+        write(items)
+    }
+    static func image(_ image: UIImage, jpeg: Data) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.jpeg.identifier, visibility: .all) { completion in completion(jpeg, nil); return nil }
+        provider.registerObject(image, visibility: .all)
+        return provider
+    }
+}
+
 struct RecognitionShareButton: UIViewRepresentable {
     var text:String
     var image:(() -> Data?)? = nil
     var imageAvailable=false
     var probe:SummaryCardProbe? = nil
+    /// Resolve once at the tap, then keep text/image fixed while the sheet is open.
+    var snapshot: (() -> RecognitionShareContent?)? = nil
+    var imageOnly = false
+    var plainTextOnly = false
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context:Context) -> UIButton {
         let button=UIButton(type:.system)
@@ -1943,10 +2419,15 @@ struct RecognitionShareButton: UIViewRepresentable {
     func updateUIView(_ button:UIButton,context:Context) {
         context.coordinator.value=self
         button.configuration?.title=nil
-        button.accessibilityLabel="分享結果"
-        button.accessibilityHint=imageAvailable ? "來源圖片與完整文字，包含原文及條碼" : "來源圖片已無法取得，分享完整文字、原文與條碼"
-        button.accessibilityIdentifier="shareRecognitionResult"
-        button.isEnabled=imageAvailable || !text.isEmpty
+        button.accessibilityLabel=imageOnly ? "分享圖片" : "分享結果"
+        button.accessibilityHint=imageOnly ? "只分享這張來源圖片，可在系統選單儲存影像" : imageAvailable ? "來源圖片與完整文字，包含原文及條碼" : "來源圖片已無法取得，分享完整文字、原文與條碼"
+        button.accessibilityIdentifier=imageOnly ? "shareRecognitionImage" : "shareRecognitionResult"
+        if plainTextOnly {
+            button.accessibilityLabel = "分享 JSON 純文字"
+            button.accessibilityHint = "只分享完整模型原始回覆"
+            button.accessibilityIdentifier = "shareRecognitionJSON"
+        }
+        button.isEnabled=imageOnly ? imageAvailable : imageAvailable || !text.isEmpty
     }
     @MainActor final class Coordinator:NSObject {
         var value:RecognitionShareButton
@@ -1958,14 +2439,30 @@ struct RecognitionShareButton: UIViewRepresentable {
             guard let presenter=responder as? UIViewController,presenter.presentedViewController == nil else { return }
             var file:RecognitionShareFile?
             var items:[Any]=[]
-            let text=value.text
+            var copyItems:[[String:Any]]=[]
+            let content: RecognitionShareContent
+            if let snapshot = value.snapshot {
+                guard let current = snapshot() else { return }
+                content = current
+            } else { content = .init(text: value.text, jpeg: value.image?()) }
+            guard !value.plainTextOnly || (content.jpeg == nil && content.document == nil) else { return }
+            if value.probe?.interceptPreparedShare?(content) == true { return }
+            guard !value.imageOnly || content.jpeg != nil else { return }
+            let text=value.imageOnly ? "" : content.document?.plainText ?? content.text
             do {
-                if let jpeg=value.image?() {
+                // Keep the direct share and explicit Copy order identical.
+                // Receiver apps decide how many independent items they consume.
+                if let jpeg=content.jpeg {
                     let source=try RecognitionShareFile(jpeg:jpeg);file=source
                     guard let image=UIImage(contentsOfFile:source.url.path) else { throw CocoaError(.fileReadCorruptFile) }
                     items.append(image)
+                    copyItems.append([UTType.jpeg.identifier: jpeg])
                 }
-                if !text.isEmpty { items.append(text) }
+                if !text.isEmpty {
+                    let representations = value.plainTextOnly ? [UTType.utf8PlainText.identifier: text] : RecognitionShareProviders.textRepresentations(content.document ?? .init(body: text))
+                    items.append(text)
+                    copyItems.append(representations)
+                }
                 guard !items.isEmpty else { return }
             } catch {
                 file?.finish()
@@ -1974,9 +2471,12 @@ struct RecognitionShareButton: UIViewRepresentable {
             }
             let lifetime=RecognitionShareLifetime(file:file,didFinish:value.probe?.shareFinished)
             let probe=value.probe
-            let activity=RecognitionActivityController(activityItems:items,applicationActivities:nil)
+            // Standard UIKit objects for direct share; Copy retains its richer frozen snapshot below.
+            let activity=RecognitionActivityController(activityItems: items, applicationActivities: nil)
             activity.lifetime=lifetime
-            activity.completionWithItemsHandler={ kind,completed,_,_ in
+            let frozenCopyItems = copyItems
+            activity.completionWithItemsHandler={ kind,completed,_,error in
+                RecognitionShareProviders.finishCopy(kind: kind, completed: completed, error: error, items: frozenCopyItems)
                 lifetime.finish();probe?.activityCompleted?(kind?.rawValue,completed)
             }
             if let popover=activity.popoverPresentationController {
@@ -1986,6 +2486,8 @@ struct RecognitionShareButton: UIViewRepresentable {
             RecognitionShareSession.shared.begin()
             presenter.present(activity,animated:true) {
                 probe?.combinedPresented?(text,file?.url,items.count)
+                probe?.itemsPresented?(items, frozenCopyItems)
+                probe?.activityPresented?(activity, button)
             }
         }
     }
@@ -1994,10 +2496,12 @@ struct RecognitionShareButton: UIViewRepresentable {
 /// A selected immutable entry keeps its reading position while new answers arrive.
 struct RecognitionHistorySheet: View {
     let records: [RecognitionHistory.Entry]
-    var sourceImages: RecognitionSourceStore? = nil
+    var sourceImages:RecognitionSourceStore? = nil
     var fixtureProbe: HistoryReadingProbe? = nil
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selected: RecognitionHistory.Entry?
+    @State private var enlargedImage: RecognitionImageSnapshot?
     var body: some View {
         NavigationStack {
             List {
@@ -2012,16 +2516,17 @@ struct RecognitionHistorySheet: View {
                         }.accessibilityIdentifier("historyEntry-\(entry.sequence)")
                     }
                 } footer: {
-                    Text("閱讀紀錄不會暫停取景。手動暫停後仍可閱讀；離開 App 或開啟設定會清除本次紀錄。")
+                    Text("閱讀紀錄不會暫停取景。手動暫停後可再辨識三次，已完成紀錄仍保留；離開 App 或開啟設定會清除本次紀錄。")
                 }
             }.navigationTitle("本次紀錄").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement:.topBarTrailing) { Button("完成") { dismiss() } } }
                 .navigationDestination(item:$selected) { entry in
-                    RecognitionResultCard(result:entry.result,isPrevious:true,sourceImages:sourceImages,fixtureProbe:fixtureProbe?.card)
+                    RecognitionResultCard(result:entry.result,isPrevious:true,sourceImages:sourceImages,fixtureProbe:fixtureProbe?.card,onOpenImage:{ enlargedImage = $0; fixtureProbe?.card.imagePresented?($0.jpeg) })
                         .id(entry.id).padding().navigationTitle("第 \(entry.sequence) 次辨識")
                         .navigationBarTitleDisplayMode(.inline)
                 }
-        }.onAppear {
+        }.sheet(item: $enlargedImage) { RecognitionImageViewer(snapshot: $0) }
+        .onAppear {
             fixtureProbe?.select = { id in selected=records.first { $0.id == id } }
             fixtureProbe?.returnToList = { selected=nil }
             fixtureProbe?.recordCount=records.count
@@ -2030,6 +2535,7 @@ struct RecognitionHistorySheet: View {
             fixtureProbe?.select = { id in selected=current.first { $0.id == id } }
         }
             .onChange(of: selected) { _, value in fixtureProbe?.selectedID=value?.id }
+            .onChange(of: scenePhase) { _, phase in if phase != .active { enlargedImage = nil } }
     }
 }
 @MainActor final class HistoryReadingProbe {
@@ -2041,6 +2547,7 @@ struct RecognitionHistorySheet: View {
 }
 
 @MainActor @Observable final class SummaryReadingFixtureState {
+    var pending: PendingRecognitionPreview?
     var result: RecognitionResult
     var previous = false
     var paused = false
@@ -2056,9 +2563,14 @@ struct HistoryReadingFixtureHost:View {
     var body:some View { RecognitionHistorySheet(records:state.records,fixtureProbe:probe) }
 }
 @MainActor final class SummaryCardProbe {
+    // Explicit verification views may inspect the real tap snapshot without a share sheet.
+    var interceptPreparedShare: ((RecognitionShareContent) -> Bool)?
     var toggleOriginal: (() -> Void)?
     var expanded = false
+    var imagePresented: ((Data) -> Void)?
     var combinedPresented: ((String,URL?,Int) -> Void)?
+    var itemsPresented: (([Any], [[String: Any]]) -> Void)?
+    var activityPresented: ((UIActivityViewController, UIButton) -> Void)?
     var activityCompleted: ((String?,Bool) -> Void)?
     var shareFinished: (() -> Void)?
 }
@@ -2071,6 +2583,13 @@ struct SummaryReadingFixtureView: View {
     } }
 }
 
+/// Match the iPhone app's portrait contract instead of UIHostingController's
+/// default all-orientations policy, which rotates the first iPad fixture window.
+@MainActor final class PortraitFixtureHost<Content: View>: UIHostingController<Content> {
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .portrait }
+}
+
 @MainActor enum SummaryReadingUIChecks {
     static func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap { descendants($0) } }
     static func settle() async { try? await Task.sleep(for: .milliseconds(350)) }
@@ -2081,11 +2600,13 @@ struct SummaryReadingFixtureView: View {
             let first=RecognitionHistory.Entry(id:UUID(),sequence:1,capturedAt:1,completedAt:2,result:state.result)
             let second=RecognitionHistory.Entry(id:UUID(),sequence:2,capturedAt:3,completedAt:4,result:.init(names:["第二筆合成答案"],summary:"較新的成功答案",text:[original]))
             let third=RecognitionHistory.Entry(id:UUID(),sequence:3,capturedAt:5,completedAt:6,result:.init(names:["第三筆合成答案"],summary:"閱讀時新加入的成功答案",text:[original]))
-            state.records=[first,second]
+            let fourth=RecognitionHistory.Entry(id:UUID(),sequence:4,capturedAt:7,completedAt:8,result:.init(names:["第四筆合成答案"],summary:"暫停再開始後的新一批答案",text:[original]))
+            state.records=[first,second,third]
             let probe=HistoryReadingProbe()
-            let host=UIHostingController(rootView:HistoryReadingFixtureHost(state:state,probe:probe).environment(\.dynamicTypeSize,type))
+            let host=PortraitFixtureHost(rootView:HistoryReadingFixtureHost(state:state,probe:probe).environment(\.dynamicTypeSize,type))
             let window=UIWindow(windowScene:scene);window.frame=CGRect(x:0,y:0,width:width,height:height)
-            window.rootViewController=host;window.makeKeyAndVisible();await settle();await settle()
+            window.rootViewController=host;window.makeKeyAndVisible();await settle()
+            window.frame=CGRect(x:0,y:0,width:width,height:height);window.bounds=CGRect(x:0,y:0,width:width,height:height);host.view.setNeedsLayout();host.view.layoutIfNeeded();await settle()
             func scroll()->UIScrollView? {
                 descendants(host.view).compactMap { $0 as? UIScrollView }.filter { $0.bounds.height>30 && $0.contentSize.height>0 }.max { $0.contentSize.height<$1.contentSize.height }
             }
@@ -2095,7 +2616,10 @@ struct SummaryReadingFixtureView: View {
                 if let data=image.pngData() { try? data.write(to:folder.appendingPathComponent(name+"-"+suffix+".png"),options:.atomic) }
             }
             var checks:[String:Bool]=[:];var metrics:[String:Double]=[:]
-            checks["twoRecordsListed"]=probe.recordCount==2;snapshot("list")
+            checks["windowSizeMatchesRequested"] = abs(host.view.bounds.width-width)<1 && abs(host.view.bounds.height-height)<1
+            metrics["actualWidth"]=Double(host.view.bounds.width);metrics["actualHeight"]=Double(host.view.bounds.height)
+            metrics["windowFrameWidth"]=Double(window.frame.width);metrics["windowFrameHeight"]=Double(window.frame.height);metrics["windowTransformB"]=Double(window.transform.b);metrics["windowTransformC"]=Double(window.transform.c)
+            checks["threeRecordsListed"]=probe.recordCount==3;snapshot("list")
             probe.select?(first.id);await settle();await settle()
             checks["selectedEarlierRecord"]=probe.selectedID==first.id
             checks["originalInitiallyCollapsed"] = !probe.card.expanded && probe.card.toggleOriginal != nil
@@ -2107,17 +2631,17 @@ struct SummaryReadingFixtureView: View {
                 checks["detailWithinScreen"]=frame.minX>=0 && frame.maxX<=width+1 && frame.maxY<=height+1 && s.bounds.height>=90
                 s.setContentOffset(CGPoint(x:0,y:180),animated:false);await settle()
                 let offset=s.contentOffset.y;metrics["readingOffsetBefore"]=Double(offset)
-                state.records.append(third);await settle()
+                state.records.append(fourth);await settle()
                 metrics["readingOffsetAfter"]=Double(scroll()?.contentOffset.y ?? -999)
-                checks["incomingAnswerAdded"]=probe.recordCount==3
+                checks["incomingAnswerAdded"]=probe.recordCount==4
                 checks["incomingAnswerKeepsSelectedRecord"]=probe.selectedID==first.id
                 checks["incomingAnswerKeepsExpansion"]=probe.card.expanded
                 checks["incomingAnswerKeepsScroll"]=abs((scroll()?.contentOffset.y ?? -999)-offset)<2
                 snapshot("new-answer-while-reading")
             } else { checks["detailScrollFound"]=false }
-            probe.returnToList?();await settle();await settle();snapshot("three-records")
-            probe.select?(third.id);await settle();await settle()
-            checks["newRecordCanBeSelected"]=probe.selectedID==third.id
+            probe.returnToList?();await settle();await settle();snapshot("four-records")
+            probe.select?(fourth.id);await settle();await settle()
+            checks["newRecordCanBeSelected"]=probe.selectedID==fourth.id
             checks["newSelectionCollapsesOriginal"] = !probe.card.expanded
             checks["newSelectionStartsAtTop"]=abs(scroll()?.contentOffset.y ?? -999)<2
             snapshot("new-selection")
@@ -2130,6 +2654,16 @@ struct SummaryReadingFixtureView: View {
         guard ProcessInfo.processInfo.arguments.contains("--camera-summary-ui-fixture"),
               let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
               let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        // The first extra UIWindow in iPhone-on-iPad compatibility adopts the
+        // scene's initial geometry instead of its requested test size. Settle
+        // that transition with an empty host before measuring actual cards.
+        let bootstrap = UIWindow(windowScene: scene)
+        let bootstrapHost = PortraitFixtureHost(rootView: Color.clear)
+        bootstrap.rootViewController = bootstrapHost; bootstrap.makeKeyAndVisible()
+        bootstrapHost.setNeedsUpdateOfSupportedInterfaceOrientations()
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+        await settle(); await settle()
+        bootstrap.isHidden = true; bootstrap.rootViewController = nil
         let folder = root.appendingPathComponent("summary-ui-fixture", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let long = String(repeating: "這是合成閱讀測試的日文標籤瓶子。簡介只整理可辨識的包裝資訊，不推測成分、療效或服用方式。\n\n", count: 12)
@@ -2148,11 +2682,11 @@ struct SummaryReadingFixtureView: View {
             let state = SummaryReadingFixtureState(.init(names:["日文標示藥瓶（合成）"],summary:summary,text:[original,"ABC-001"],barcodes:["0012345678905"]))
             state.paused=name.hasPrefix("paused-")
             state.records=[.init(id:UUID(),sequence:1,capturedAt:1,completedAt:2,result:state.result)]
-            let host = UIHostingController(rootView: CameraView(readingFixture: state).environment(\.dynamicTypeSize,type))
+            let host = PortraitFixtureHost(rootView: CameraView(readingFixture: state).environment(\.dynamicTypeSize,type))
             let window = UIWindow(windowScene: scene)
             window.frame = CGRect(x:0,y:0,width:width,height:height)
             window.rootViewController = host; window.makeKeyAndVisible()
-            await settle(); host.view.setNeedsLayout(); host.view.layoutIfNeeded(); await settle()
+            await settle(); window.frame=CGRect(x:0,y:0,width:width,height:height); window.bounds=CGRect(x:0,y:0,width:width,height:height); host.view.setNeedsLayout(); host.view.layoutIfNeeded(); await settle()
             func scroll() -> UIScrollView? {
                 descendants(host.view).compactMap { $0 as? UIScrollView }.filter { $0.bounds.height > 30 && $0.contentSize.height > 0 }.max { $0.contentSize.height < $1.contentSize.height }
             }
@@ -2163,6 +2697,9 @@ struct SummaryReadingFixtureView: View {
             }
             var checks: [String:Bool] = [:]
             var metrics: [String:Double] = [:]
+            checks["windowSizeMatchesRequested"] = abs(host.view.bounds.width-width)<1 && abs(host.view.bounds.height-height)<1
+            metrics["actualWidth"]=Double(host.view.bounds.width);metrics["actualHeight"]=Double(host.view.bounds.height)
+            metrics["windowFrameWidth"]=Double(window.frame.width);metrics["windowFrameHeight"]=Double(window.frame.height);metrics["windowTransformB"]=Double(window.transform.b);metrics["windowTransformC"]=Double(window.transform.c)
             if let s=scroll() {
                 let card=s.convert(s.bounds,to:host.view)
                 let bars=descendants(host.view).compactMap { $0 as? UINavigationBar }
@@ -2207,7 +2744,7 @@ struct SummaryReadingFixtureView: View {
         }
         reports += await historyCases(scene:scene,folder:folder,long:long,original:original)
         let passed = reports.count==cases.count+2 && reports.allSatisfy { $0["passed"] as? Bool == true }
-        let report: [String:Any] = ["fixture":"summary-reading-production-swiftui","revision":2,"processID":ProcessInfo.processInfo.processIdentifier,"recordedAt":ISO8601DateFormatter().string(from:Date()),"complete":true,"allPassed":passed,"cameraStarted":false,"networkRequests":0,"cases":reports,"scope":"Actual CameraView layout and RecognitionResultCard with synthetic preview/content. UIKit scroll offsets and production disclosure binding; not a physical finger gesture or real-camera acceptance."]
+        let report: [String:Any] = ["fixture":"summary-reading-production-swiftui","revision":7,"processID":ProcessInfo.processInfo.processIdentifier,"recordedAt":ISO8601DateFormatter().string(from:Date()),"complete":true,"allPassed":passed,"cameraStarted":false,"networkRequests":0,"cases":reports,"scope":"Actual CameraView layout and RecognitionResultCard with synthetic preview/content. UIKit scroll offsets and production disclosure binding; not a physical finger gesture or real-camera acceptance."]
         if let data=try? JSONSerialization.data(withJSONObject:report,options:[.sortedKeys]) { try? data.write(to:folder.appendingPathComponent("report.json"),options:.atomic) }
         return passed
     }

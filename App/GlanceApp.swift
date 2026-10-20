@@ -2,12 +2,24 @@ import SwiftUI
 import Combine
 
 @main struct GlanceApp: App {
+    init() {
+        #if !GLANCE_TEXT_TRIAL && !GLANCE_READINESS_DIAGNOSTIC
+        SIWCAuthFixtureProgress.shared.boot()
+        #endif
+    }
     var body: some Scene { WindowGroup {
-        if ProcessInfo.processInfo.arguments.contains("--camera-summary-ui-fixture") { SummaryReadingFixtureView() }
+        #if GLANCE_TEXT_TRIAL || GLANCE_READINESS_DIAGNOSTIC
+        BoundedTextTrialView(arguments: ProcessInfo.processInfo.arguments)
+        #else
+        if BoundedSavedReplayCoordinator.requested(ProcessInfo.processInfo.arguments) { BoundedSavedReplayView(arguments: ProcessInfo.processInfo.arguments) }
+        else if ProcessInfo.processInfo.arguments.contains("--siwc-auth-fixture") { SIWCAuthFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("--camera-summary-ui-fixture") { SummaryReadingFixtureView() }
         else if ProcessInfo.processInfo.arguments.contains("--loopback-probe") { ProbeView() }
         else if ProcessInfo.processInfo.arguments.contains("--siwc-validation") { SIWCView() }
         else if ProcessInfo.processInfo.arguments.contains("--mock") { MockView() }
-        else { CameraView() }
+        else if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--camera-") }) { CameraView() }
+        else { SingleCaptureView() }
+        #endif
     } }
 }
 

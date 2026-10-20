@@ -36,6 +36,26 @@ private func pending(client: String? = nil, expiry: Date = Date().addingTimeInte
     var denied = pending()
     #expect(throws: SIWCError.denied) { try denied.callback(target: "/auth/callback?state=expected-state&error=access_denied") }
 }
+@Test func callbackFormDecodesExactlyOnce() throws {
+    for (encoded, expected) in [("a+b", "a b"), ("a%2Bb", "a+b"), ("a%252Bb", "a%2Bb"),
+                                ("a%20b", "a b"), ("a%26%3Db", "a&=b"), ("a%25b", "a%b")] {
+        var p = pending(client: "issued")
+        let result = try p.callback(target: "/auth/callback?state=expected-state&code=" + encoded)
+        #expect(result.code == expected)
+        #expect(result.clientID == "issued")
+    }
+}
+@Test func callbackFormKeepsStateClientAndDuplicateGuards() throws {
+    for query in ["state=expected-state&%73tate=expected-state&code=c",
+                  "state=expected-state&code=c&%63ode=d",
+                  "state=expected-state&code=c&client_id=issued&client%5Fid=issued",
+                  "state=expected+state&code=c", "state=expected-state&code=c&client_id=other",
+                  "state=expected-state&code=c&x+y=1&x%20y=2"] {
+        var p = pending(client: "issued")
+        #expect(throws: SIWCError.invalidCallback) { try p.callback(target: "/auth/callback?" + query) }
+        #expect(try p.callback(target: "/auth/callback?state=expected-state&code=valid").code == "valid")
+    }
+}
 @Test func planScopeAndSafeImageBody() throws {
     #expect(!SIWCProtocol.hasPlan("openid profile email"))
     #expect(SIWCProtocol.hasPlan(SIWCProtocol.scopes))

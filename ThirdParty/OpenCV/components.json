@@ -1,0 +1,49 @@
+[
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/protobuf/LICENSE",
+    "path": "components/protobuf/LICENSE",
+    "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+  },
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/libjpeg-turbo/LICENSE.md",
+    "path": "components/libjpeg-turbo/LICENSE.md",
+    "sha256": "96f5b328adbb78eeaaec6980d73fd558cb1e4d62560ed615646bc3cf5e532430"
+  },
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/libjpeg-turbo/README.ijg",
+    "path": "components/libjpeg-turbo/README.ijg",
+    "sha256": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6"
+  },
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/libwebp/COPYING",
+    "path": "components/libwebp/COPYING",
+    "sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+  },
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/libpng/LICENSE",
+    "path": "components/libpng/LICENSE",
+    "sha256": "bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526"
+  },
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/zlib/LICENSE",
+    "path": "components/zlib/LICENSE",
+    "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+  },
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/flatbuffers/LICENSE.txt",
+    "path": "components/flatbuffers/LICENSE.txt",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  {
+    "source": "https://github.com/opencv/opencv/blob/5.0.0/3rdparty/mlas/LICENSE",
+    "path": "components/mlas/LICENSE",
+    "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+  },
+  {
+    "source": "https://gitlab.arm.com/kleidi/kleidicv/-/tree/26.03",
+    "archiveSHA256": "1bb4078fd215565f3906c33f76a00e7b843328965230d765afcd0d51141c434f",
+    "opencvPinnedArchiveMD5": "b85a745bfe0e87e67e30be9533eb6b24",
+    "path": "components/kleidicv/LICENSE",
+    "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+  }
+]

@@ -8,6 +8,7 @@ public enum SIWCError: Error, Equatable {
 }
 
 public enum SIWCProtocol {
+    public static let callbackRevision = "C1"
     public static let issuer = "https://auth.openai.com"
     public static let resource = "https://api.openai.com/v1"
     public static let scopes = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
@@ -33,6 +34,22 @@ public enum SIWCProtocol {
     public static func hasPlan(_ scopes: String) -> Bool { Set(scopes.split(separator: " ")).contains("chatgpt.tokens.use.direct") }
 }
 
+/// A single registration's retry permit. It contains no OAuth or account values.
+public struct SIWCRegistrationRetry: Codable, Equatable, Sendable {
+    public enum State: String, Codable, Sendable { case awaitingExchange, available, consumed }
+    public private(set) var state: State = .awaitingExchange
+    public init() {}
+    public mutating func recordExchangeFailure(errorCode: String?, exchangeOrdinal: Int) -> Bool {
+        guard state == .awaitingExchange, errorCode == "invalid_grant", exchangeOrdinal == 1 else { return false }
+        state = .available; return true
+    }
+    /// Persist the consumed value before starting discovery/listener/browser work.
+    public mutating func consume(confirmedSameAccountAndWorkspace: Bool) -> Bool {
+        guard confirmedSameAccountAndWorkspace, state == .available else { return false }
+        state = .consumed; return true
+    }
+}
+
 public struct SIWCPending: Sendable {
     public let state: String
     public let nonce: String
@@ -45,6 +62,10 @@ public struct SIWCPending: Sendable {
         self.state = state; self.nonce = nonce; self.verifier = verifier
         self.redirect = "http://127.0.0.1:\(port)/auth/callback"; self.clientID = clientID; self.deadline = deadline
     }
+    public static func fresh(port: UInt16, clientID: String?, now: Date = Date()) throws -> Self {
+        Self(state: try SIWCProtocol.random(), nonce: try SIWCProtocol.random(), verifier: try SIWCProtocol.random(),
+             port: port, clientID: clientID, deadline: now.addingTimeInterval(300))
+    }
     public func authorize(hostID: String, idTokenHint: String? = nil) -> URL {
         var fields = ["client_id": clientID ?? "dynamic_agent_client", "ext_agent_host_id": hostID,
                       "response_type": "code", "redirect_uri": redirect, "scope": SIWCProtocol.scopes,
@@ -56,18 +77,34 @@ public struct SIWCPending: Sendable {
         url.queryItems = fields.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         return url.url!
     }
-    public mutating func callback(target: String, now: Date = Date()) throws -> (code: String, clientID: String) {
-        guard !consumed, now < deadline, let url = URLComponents(string: target), url.scheme == nil,
-              url.host == nil, url.fragment == nil, url.percentEncodedPath == "/auth/callback" else { throw SIWCError.invalidCallback }
+    public mutating func callback(target: String, now: Date = Date(), diagnostic: ((SIWCCallbackDiagnostic) -> Void)? = nil) throws -> (code: String, clientID: String) {
+        func rejected(_ reason: SIWCAuthCategory) -> SIWCError {
+            diagnostic?(.init(accepted: false, category: reason)); return .invalidCallback
+        }
+        guard !consumed else { throw rejected(.callbackConsumed) }
+        guard now < deadline else { throw rejected(.callbackExpired) }
+        guard var url = URLComponents(string: target), url.scheme == nil,
+              url.host == nil, url.fragment == nil, url.percentEncodedPath == "/auth/callback" else { throw rejected(.callbackShape) }
+        // OAuth authorization responses use form encoding (RFC 6749 §4.1.2).
+        // Normalize raw '+' before URLComponents performs its single percent decode:
+        // %2B stays a literal plus, and %252B stays the literal string "%2B".
+        url.percentEncodedQuery = url.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%20")
         let items = url.queryItems ?? []
         let names = items.map(\.name)
-        guard Set(names).count == names.count, items.first(where: { $0.name == "state" })?.value == state else { throw SIWCError.invalidCallback }
-        if items.contains(where: { $0.name == "error" }) { consumed = true; throw SIWCError.denied }
+        guard Set(names).count == names.count, items.first(where: { $0.name == "state" })?.value == state else { throw rejected(.callbackState) }
+        if let error = items.first(where: { $0.name == "error" }) {
+            consumed = true
+            let description = items.first(where: { $0.name == "error_description" })
+            diagnostic?(.init(accepted: false, category: error.value == "access_denied" ? .oauthDenied : .oauthError, errorCode: error.value,
+                              errorDescription: .validatedCallback(present: description != nil, value: description?.value)))
+            throw SIWCError.denied
+        }
         let supplied = items.first(where: { $0.name == "client_id" })?.value
-        if let clientID, let supplied, supplied != clientID { throw SIWCError.invalidCallback }
-        guard let issued = supplied ?? clientID, !issued.isEmpty, issued != "dynamic_agent_client", issued.count <= 256,
-              let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty, code.count <= 4096 else { throw SIWCError.invalidCallback }
+        if let clientID, let supplied, supplied != clientID { throw rejected(.callbackClient) }
+        guard let issued = supplied ?? clientID, !issued.isEmpty, issued != "dynamic_agent_client", issued.count <= 256 else { throw rejected(.callbackClient) }
+        guard let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty, code.count <= 4096 else { throw rejected(.callbackMissingCode) }
         consumed = true
+        diagnostic?(.init(accepted: true))
         return (code, issued)
     }
     public func codeExchange(code: String, issuedClientID: String) -> Data {
@@ -139,7 +176,7 @@ public enum SIWCSafeDiagnostic {
     }
     public static func parameter(_ raw: String?) -> String? {
         guard let raw else { return nil }
-        return ["model", "reasoning.effort", "input", "input_image", "image_url", "store", "stream", "service_tier"].contains(raw) ? raw : "unrecognized_parameter"
+        return ["max_output_tokens", "model", "reasoning.effort", "input", "input_image", "image_url", "store", "stream", "service_tier", "text", "text.format", "text.format.type", "text.format.strict", "text.format.schema"].contains(raw) ? raw : "unrecognized_parameter"
     }
 }
 public struct SIWCStreamFailure: Error, Sendable {
@@ -221,8 +258,20 @@ public struct SIWCStream {
                 let error = (response?["error"] as? [String: Any]) ?? (event["error"] as? [String: Any]) ?? event
                 throw SIWCStreamFailure(terminal: type, code: SIWCSafeDiagnostic.code(error["code"] as? String), parameter: SIWCSafeDiagnostic.parameter(error["param"] as? String))
             }
+            if type.hasPrefix("response.refusal.") {
+                terminal = "response.refusal"
+                throw SIWCStreamFailure(terminal: "response.refusal", code: nil, parameter: nil)
+            }
             if type == "response.output_text.delta" { text += event["delta"] as? String ?? "" }
-            if type == "response.completed" { completed = true; terminal = type }
+            if type == "response.completed" {
+                let response = event["response"] as? [String: Any]
+                if let status = response?["status"] as? String, status != "completed" { throw SIWCError.incompleteStream }
+                let outputs = response?["output"] as? [[String: Any]] ?? []
+                if outputs.contains(where: { item in
+                    (item["content"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "refusal" }
+                }) { throw SIWCStreamFailure(terminal: "response.refusal", code: nil, parameter: nil) }
+                completed = true; terminal = type
+            }
             guard text.utf8.count <= 32768 else { throw SIWCError.sseSizeLimit }
         }
     }

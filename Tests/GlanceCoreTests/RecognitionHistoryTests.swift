@@ -49,9 +49,9 @@ private func historyFeed(_ state:inout LiveRecognitionSession,from:Double,opposi
     #expect({state.complete(first,result:.init(names:["A"]),at:1.1)}())
     historyFeed(&state,from:2,opposite:true)
     let second=try #require({state.startRequest(snapshotCapturedAt:3,at:3)}())
-    state.stop(preservingHistory:true)
+    state.stop(preservingHistory:true,resetBudget:true)
     #expect(state.visible?.names==["A"] && state.visibleIsPrevious && state.history.entries.count==1)
-    #expect(state.inflightRequest==second && state.sentCount==2)
+    #expect(state.inflightRequest==second && state.sentCount==0 && state.lifetimeSentCount==2)
     #expect({!state.complete(second,result:.init(names:["舊世代B"]),at:3.5)}())
     #expect(state.history.entries.count==1)
     historyFeed(&state,from:4)
@@ -59,7 +59,7 @@ private func historyFeed(_ state:inout LiveRecognitionSession,from:Double,opposi
     #expect({state.complete(third,result:.init(names:["新世代C"]),at:5.1)}())
     #expect(state.history.entries.map(\.sequence)==[1,3] && state.visible?.names==["新世代C"])
     state.stop()
-    #expect(state.history.entries.isEmpty && state.visible==nil && state.sentCount==3)
+    #expect(state.history.entries.isEmpty && state.visible==nil && state.sentCount==1 && state.lifetimeSentCount==3)
 }
 @Test func backgroundClearsHistoryAndThirdReplyCannotRepopulateIt() throws {
     var state=LiveRecognitionSession()

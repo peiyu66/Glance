@@ -4,7 +4,7 @@ import SwiftUI
 import CoreImage
 import CryptoKit
 
-/// Immutable sample crosses the serial capture queue to the UI actor. Never stored on disk.
+/// Immutable sample crosses the serial capture queue; only an explicitly reserved JPEG is archived.
 final class CameraFrame: @unchecked Sendable {
     let image: CGImage
     let fingerprint: SceneFingerprint
@@ -13,12 +13,35 @@ final class CameraFrame: @unchecked Sendable {
     let regionalText: RegionalText?
     let time: TimeInterval
     let registration: NativeSceneRegistration.Observation?
-    init(image: CGImage, fingerprint: SceneFingerprint, feature: VNFeaturePrintObservation?, labelSignature: String = "", regionalText: RegionalText? = nil, time: TimeInterval, registration: NativeSceneRegistration.Observation? = nil) {
-        self.image = image; self.fingerprint = fingerprint; self.feature = feature; self.labelSignature = labelSignature; self.regionalText = regionalText; self.time = time; self.registration = registration
+    let identity: FixedForegroundMatcher.Observation?
+    let visibleStamp: VisibleCaptureGate.Stamp?
+    let focusStamp: CameraFocusGate.Stamp?
+    let focusQuality: CentralFocusQuality?
+    let darknessStamp: CameraDarknessGate.Stamp?
+    init(image: CGImage, fingerprint: SceneFingerprint, feature: VNFeaturePrintObservation?, labelSignature: String = "", regionalText: RegionalText? = nil, time: TimeInterval, registration: NativeSceneRegistration.Observation? = nil, identity: FixedForegroundMatcher.Observation? = nil, focusStamp: CameraFocusGate.Stamp? = nil, visibleStamp: VisibleCaptureGate.Stamp? = nil, focusQuality: CentralFocusQuality? = nil, darknessStamp: CameraDarknessGate.Stamp? = nil) {
+        self.image = image; self.fingerprint = fingerprint; self.feature = feature; self.labelSignature = labelSignature; self.regionalText = regionalText; self.time = time; self.registration = registration; self.identity = identity; self.focusStamp = focusStamp; self.visibleStamp = visibleStamp; self.focusQuality = focusQuality; self.darknessStamp = darknessStamp
+    }
+    func withDarknessStamp(_ stamp: CameraDarknessGate.Stamp?) -> CameraFrame {
+        CameraFrame(image: image, fingerprint: fingerprint, feature: feature, labelSignature: labelSignature,
+            regionalText: regionalText, time: time, registration: registration, identity: identity,
+            focusStamp: focusStamp, visibleStamp: visibleStamp, focusQuality: focusQuality, darknessStamp: stamp)
+    }
+    func withFocusStamp(_ stamp: CameraFocusGate.Stamp) -> CameraFrame {
+        CameraFrame(image: image, fingerprint: fingerprint, feature: feature, labelSignature: labelSignature,
+            regionalText: regionalText, time: time, registration: registration, identity: identity, focusStamp: stamp, visibleStamp: visibleStamp, focusQuality: focusQuality, darknessStamp: darknessStamp)
+    }
+    func withVisibleStamp(_ stamp: VisibleCaptureGate.Stamp?) -> CameraFrame {
+        CameraFrame(image: image, fingerprint: fingerprint, feature: feature, labelSignature: labelSignature,
+            regionalText: regionalText, time: time, registration: registration, identity: identity,
+            focusStamp: focusStamp, visibleStamp: stamp, focusQuality: focusQuality, darknessStamp: darknessStamp)
     }
 }
 
 struct CaptureStatistics: Sendable {
+    var focusRejected = 0
+    var continuousAutoFocusSupported: Bool?
+    var focusModeBefore: Int?
+    var focusModeActive: Int?
     var targetCropFraction: Double?
     var targetTextBoxes: Int?
     var targetBarcodeBoxes: Int?
@@ -43,18 +66,92 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var stats = CaptureStatistics()
     var onFrame: (@Sendable (CameraFrame?, UUID, CaptureStatistics) -> Void)?
     var onFailure: (@Sendable (String) -> Void)?
+    var onFocusChange: (@Sendable (CameraFocusGate.Snapshot, UUID) -> Void)?
+    var onDarknessChange: (@Sendable (CameraDarknessGate.Decision, UUID) -> Void)?
+    let darknessGate = CameraDarknessGate()
+    private var lastDarknessSample = -Double.infinity
+    private var monitorsDarkness = false
+    let focusGate = CameraFocusGate()
+    let analysisGate = FrameAnalysisGate()
+    let visibleGate = VisibleCaptureGate()
+    private let previewLock = NSLock()
+    private var previewSink: (@Sendable (CGImage, VisibleCaptureGate.Stamp) -> Void)?
+    private var focusSelectionEnabled = false
+    func setFocusSelectionEnabled(_ enabled: Bool) { previewLock.withLock { focusSelectionEnabled = enabled } }
+    private var previewQueued = false
+    private var lastPreview = 0.0
+    func setVisiblePreview(_ sink: (@Sendable (CGImage, VisibleCaptureGate.Stamp) -> Void)?) {
+        previewLock.withLock { previewSink = sink }
+        visibleGate.invalidate()
+    }
+    private func publishPreview(_ image: CGImage, stamp: VisibleCaptureGate.Stamp) {
+        let sink = previewLock.withLock { () -> (@Sendable (CGImage, VisibleCaptureGate.Stamp) -> Void)? in
+            guard !previewQueued, let previewSink else { return nil }
+            previewQueued = true; return previewSink
+        }
+        guard let sink else { return }
+        DispatchQueue.main.async { [self] in
+            defer { previewLock.withLock { previewQueued = false } }
+            sink(image, stamp)
+        }
+    }
+    func setAnalysisEnabled(_ enabled: Bool) {
+        if enabled {
+            analysisGate.enable(at: Self.hostTime())
+            queue.async { [self] in liveRegistration.reset(); analysisFocusRevision = nil; lastSample = 0 }
+        } else { analysisGate.disable() }
+    }
+    private var focusObservation: NSKeyValueObservation?
+    private var analysisFocusRevision: UInt64?
+    static func hostTime() -> Double { CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) }
     private var firstCaptureOnly = false
     private var liveCurrent = false
     private let liveRegistration = NativeSceneRegistration()
-    func resetLiveRegistration() { liveRegistration.reset() }
-    func prepareLiveFrame(_ image:CGImage,time:Double) throws -> CameraFrame {
-        _ = try Self.prepareFirstCapture(image,time:time)
+    private let fixedMatcher = FixedForegroundMatcher()
+    func updateFixedReferences(_ refs: [FixedForegroundMatcher.Reference]) { fixedMatcher.update(refs) }
+    func syntheticIdentity(_ png: Data, mask: Data, time: Double) throws -> FixedForegroundMatcher.Observation { try fixedMatcher.synthetic(png, mask: mask, capturedAt: time) }
+    func fixtureMaskProbe(_ image: CGImage, time: Double) -> FixedForegroundMatcher.Observation { fixedMatcher.prepare(image, capturedAt: time) }
+
+    func resetLiveRegistration() { liveRegistration.reset(); fixedMatcher.update([]) }
+    func prepareLiveFrame(_ image:CGImage,time:Double,focusStamp:CameraFocusGate.Stamp? = nil,focusQuality:CentralFocusQuality? = nil) throws -> CameraFrame {
+        if let focusStamp { try focusGate.requireCurrent(focusStamp) }
+        if focusQuality == nil { _ = try Self.prepareFirstCapture(image,time:time) }
+        else if Self.fingerprint(image) == nil { throw PreparationFailure.invalidCrop }
         guard let evidence=liveRegistration.observe(image) else { throw PreparationFailure.invalidCrop }
-        return CameraFrame(image:image,fingerprint:evidence.fingerprint,feature:nil,time:time,registration:evidence)
+        if let focusStamp { try focusGate.requireCurrent(focusStamp) }
+        let identity = fixedMatcher.prepare(image,capturedAt:time)
+        if let focusStamp { try focusGate.requireCurrent(focusStamp) }
+        return CameraFrame(image:image,fingerprint:evidence.fingerprint,feature:nil,time:time,registration:evidence,identity:identity,focusStamp:focusStamp,focusQuality:focusQuality)
     }
-    func start(generation: UUID, firstCaptureOnly: Bool = false, liveCurrent: Bool = false) {
+    private func configureFocus(_ device: AVCaptureDevice) throws {
+        focusObservation?.invalidate()
+        let continuous = device.isFocusModeSupported(.continuousAutoFocus)
+        let supported = continuous || device.isFocusModeSupported(.autoFocus)
+        stats.continuousAutoFocusSupported = continuous; stats.focusModeBefore = device.focusMode.rawValue
+        let epoch = generation
+        let initial = focusGate.begin(session: epoch, autofocusSupported: supported, adjusting: device.isAdjustingFocus, at: Self.hostTime())
+        onFocusChange?(initial, epoch)
+        focusObservation = device.observe(\.isAdjustingFocus, options: [.initial, .new]) { [weak self] device, change in
+            guard let self else { return }
+            // Do not enqueue this update behind expensive frame analysis.
+            let snapshot = self.focusGate.update(adjusting: change.newValue ?? device.isAdjustingFocus, session: epoch, at: Self.hostTime())
+            self.onFocusChange?(snapshot, epoch)
+        }
+        if supported {
+            try device.lockForConfiguration(); defer { device.unlockForConfiguration() }
+            if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+            device.focusMode = continuous ? .continuousAutoFocus : .autoFocus
+        }
+        stats.focusModeActive = device.focusMode.rawValue
+        analysisFocusRevision = nil
+    }
+    func start(generation: UUID, firstCaptureOnly: Bool = false, liveCurrent: Bool = false, analyzing: Bool = true) {
+        setAnalysisEnabled(analyzing)
         queue.async { [self] in
             self.generation = generation; self.firstCaptureOnly = firstCaptureOnly; self.liveCurrent = liveCurrent; liveRegistration.reset(); stats = CaptureStatistics()
+            monitorsDarkness = firstCaptureOnly && liveCurrent && previewLock.withLock { focusSelectionEnabled }
+            lastDarknessSample = -Double.infinity
+            if monitorsDarkness { darknessGate.begin(session: generation) } else { darknessGate.stop() }
             do {
                 if !configured {
                     session.beginConfiguration(); defer { session.commitConfiguration() }
@@ -69,6 +166,9 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                     guard session.canAddOutput(output) else { throw SIWCError.invalidResponse }; session.addOutput(output)
                     if let c = output.connection(with: .video), c.isVideoRotationAngleSupported(90) { c.videoRotationAngle = 90 }
                     configured = true
+                }
+                if let input = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first {
+                    try configureFocus(input.device)
                 }
                 // Prefer a mode explicitly documented not to add pipeline latency.
                 // Supported connection and active format are both required. The
@@ -87,45 +187,151 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                     connection.preferredVideoStabilizationMode = requested
                 }
                 if !session.isRunning { session.startRunning() }
-            } catch { onFailure?("camera-configuration") }
+            } catch { focusGate.stop(); onFailure?("camera-configuration") }
         }
     }
-    func stop() { queue.async { [self] in if session.isRunning { session.stopRunning() }; lastSample = 0 } }
+    func stop() {
+        darknessGate.stop()
+        analysisGate.disable()
+        focusGate.stop(); visibleGate.invalidate()
+        queue.async { [self] in
+            focusObservation?.invalidate(); focusObservation = nil
+            if session.isRunning { session.stopRunning() }; lastSample = 0
+            // A previously queued start may have begun focus monitoring after
+            // the synchronous stop above. End it again on the session queue.
+            focusGate.stop()
+        }
+    }
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        let visible = previewLock.withLock { previewSink != nil }
+        let now = ProcessInfo.processInfo.systemUptime
+        // 16x16 direct BGRA reads at 4 Hz, also while recognition analysis is off.
+        // Every eligible recognition sample is checked before Vision/ORB or publication.
+        if monitorsDarkness && (now - lastDarknessSample >= 0.25 || (analysisGate.enabled && now - lastSample >= 0.25)) {
+            lastDarknessSample = now
+            let viewport = visibleGate.stamp(at: now)?.viewport ?? CGSize(width: 1, height: 1)
+            let metrics = CMSampleBufferGetImageBuffer(sampleBuffer).flatMap { Self.darknessMetrics($0, viewport: viewport) }
+            let decision = darknessGate.observe(metrics, at: now, session: generation)
+            onDarknessChange?(decision, generation)
+        }
+        // Preview is capped at 15 fps; costly recognition analysis stays at 4 fps.
+        // The same image instance is used for display and any selected sample.
+        var visibleImage: CGImage?
+        var visibleStamp: VisibleCaptureGate.Stamp?
+        if visible {
+            guard now - lastPreview >= 1.0 / 15.0,
+                  let clock = session.synchronizationClock,
+                  let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            lastPreview = now
+            let pts = CMTimeGetSeconds(CMSyncConvertTime(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), from: clock, to: CMClockGetHostTimeClock()))
+            guard let stamp = visibleGate.stamp(at: pts),
+                  let image = Self.visibleImage(CIImage(cvPixelBuffer: pixel), viewport: stamp.viewport, context: context) else { return }
+            visibleImage = image; visibleStamp = stamp
+            publishPreview(image, stamp: stamp)
+        }
+        guard analysisGate.enabled, !darknessGate.isBlocked else { return }
         stats.stabilizationSupported = connection.isVideoStabilizationSupported
         stats.stabilizationPreferred = connection.preferredVideoStabilizationMode.rawValue
         stats.stabilizationActive = connection.activeVideoStabilizationMode.rawValue
         if let input = connection.inputPorts.first?.input as? AVCaptureDeviceInput { stats.standardStabilizationSupported = input.device.activeFormat.isVideoStabilizationModeSupported(.standard) }
         stats.frames += 1
-        let now = ProcessInfo.processInfo.systemUptime
         guard now - lastSample >= 0.25 else { return }; lastSample = now; stats.samples += 1
+        guard let clock = session.synchronizationClock else { stats.focusRejected += 1; onFrame?(nil,generation,stats); return }
+        let hostPTS = CMTimeGetSeconds(CMSyncConvertTime(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), from: clock, to: CMClockGetHostTimeClock()))
+        guard let analysisPermit = analysisGate.permit(capturedAt: hostPTS) else { return }
+        guard let focusStamp = focusGate.stamp(capturedAt: hostPTS) else { stats.focusRejected += 1; onFrame?(nil,generation,stats); return }
+        if analysisFocusRevision != focusStamp.revision {
+            // Only temporal alignment is reset. Keep the paid ORB reference catalog.
+            liveRegistration.reset(); analysisFocusRevision = focusStamp.revision
+        }
+        func publish(_ frame: CameraFrame?) {
+            guard analysisGate.accepts(analysisPermit, capturedAt: hostPTS), !darknessGate.isBlocked else { return }
+            onFrame?(frame?.withDarknessStamp(darknessGate.stamp(session: generation)), generation, stats)
+        }
         autoreleasepool {
-            guard let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { onFrame?(nil, generation, stats); return }
+            guard let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { publish(nil); return }
             let ci = CIImage(cvPixelBuffer: pixel)
-            guard let image = Self.centralImage(ci, context: context), let fp = Self.fingerprint(image), let qualitySample = Self.fingerprint(image, side: 128) else { stats.qualityRejected += 1; onFrame?(nil, generation, stats); return }
+            guard let image = visibleImage ?? Self.centralImage(ci, context: context), Self.fingerprint(image) != nil, let qualitySample = Self.fingerprint(image, side: 128) else { stats.qualityRejected += 1; publish(nil); return }
             let quality = SceneQuality(qualitySample); stats.contrast = quality.contrast; stats.edgeScore = quality.edgeScore
-            guard quality.usable else { stats.qualityRejected += 1; onFrame?(nil, generation, stats); return }
+            let focusQuality = firstCaptureOnly && liveCurrent && previewLock.withLock({ focusSelectionEnabled })
+                ? Self.centralFocusQuality(image) : nil
+            // This scoped path distinguishes low texture/low light from blur;
+            // legacy multi-object quality and ORB behavior are unchanged.
+            guard quality.usable || focusQuality != nil else { stats.qualityRejected += 1; publish(nil); return }
             if firstCaptureOnly {
                 do {
-                    let prepared = try liveCurrent ? prepareLiveFrame(image,time:now) : Self.prepareFirstCapture(image,time:now)
+                    let prepared = try liveCurrent ? prepareLiveFrame(image,time:now,focusStamp:focusStamp,focusQuality:focusQuality) : Self.prepareFirstCapture(image,time:now)
+                    try focusGate.requireCurrent(focusStamp)
                     stats.localProcessingMS = (ProcessInfo.processInfo.systemUptime-now)*1000
                     stats.targetCropFraction = 1; stats.accepted += 1
-                    onFrame?(prepared, generation, stats)
-                } catch { stats.qualityRejected += 1; onFrame?(nil, generation, stats) }
+                    publish(prepared.withFocusStamp(focusStamp).withVisibleStamp(visibleStamp))
+                } catch is CameraFocusGate.Rejection { stats.focusRejected += 1; publish(nil) }
+                  catch { stats.qualityRejected += 1; publish(nil) }
                 return
             }
             do {
+                try focusGate.requireCurrent(focusStamp)
                 let prepared=try Self.prepareTarget(image,time:now)
+                try focusGate.requireCurrent(focusStamp)
                 stats.localProcessingMS=(ProcessInfo.processInfo.systemUptime-now)*1000
                 stats.targetCropFraction=Double(prepared.crop.width*prepared.crop.height)
                 stats.targetTextBoxes=prepared.includedTextBoxes;stats.targetBarcodeBoxes=prepared.includedBarcodeBoxes
                 stats.accepted += 1
-                onFrame?(prepared.frame,generation,stats)
-            } catch PreparationFailure.noCentralObject { stats.saliencyRejected += 1;onFrame?(nil,generation,stats) }
-              catch PreparationFailure.qualityRejected { stats.qualityRejected += 1;onFrame?(nil,generation,stats) }
-              catch { stats.visionRejected += 1;onFrame?(nil,generation,stats);onFailure?("local-vision") }
+                publish(prepared.frame.withFocusStamp(focusStamp))
+            } catch is CameraFocusGate.Rejection { stats.focusRejected += 1;publish(nil) }
+              catch PreparationFailure.noCentralObject { stats.saliencyRejected += 1;publish(nil) }
+              catch PreparationFailure.qualityRejected { stats.qualityRejected += 1;publish(nil) }
+              catch { stats.visionRejected += 1;publish(nil);onFailure?("local-vision") }
 
         }
+    }
+    /// Sample the visible crop without a render, Vision request, image retention or log.
+    static func darknessMetrics(_ pixel: CVPixelBuffer, viewport: CGSize) -> CameraDarknessMetrics? {
+        guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_32BGRA,
+              CVPixelBufferLockBaseAddress(pixel, .readOnly) == kCVReturnSuccess else { return nil }
+        defer { CVPixelBufferUnlockBaseAddress(pixel, .readOnly) }
+        let width = CVPixelBufferGetWidth(pixel), height = CVPixelBufferGetHeight(pixel)
+        guard let base = CVPixelBufferGetBaseAddress(pixel),
+              let crop = VisibleCaptureGate.crop(source: CGRect(x: 0, y: 0, width: width, height: height), viewport: viewport) else { return nil }
+        let bytes = base.assumingMemoryBound(to: UInt8.self), stride = CVPixelBufferGetBytesPerRow(pixel)
+        var samples: [UInt8] = []; samples.reserveCapacity(256)
+        for y in 0..<16 { for x in 0..<16 {
+            let px = min(width - 1, Int(crop.minX + (CGFloat(x) + 0.5) * crop.width / 16))
+            let py = min(height - 1, Int(crop.minY + (CGFloat(y) + 0.5) * crop.height / 16))
+            let i = py * stride + px * 4
+            samples.append(UInt8((Int(bytes[i + 2]) * 77 + Int(bytes[i + 1]) * 150 + Int(bytes[i]) * 29) >> 8))
+        } }
+        return CameraDarknessMetrics(luminance: samples)
+    }
+    /// The central 40% is a measurement-only ROI; no output pixels are replaced.
+    /// Render grayscale once (max 256 pixels/edge) and use the existing OpenCV bridge.
+    static func centralFocusQuality(_ image: CGImage) -> CentralFocusQuality {
+        let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let side = min(bounds.width, bounds.height) * 0.4
+        let roi = CGRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side).integral
+        guard let crop = image.cropping(to: roi) else { return .unavailable }
+        let size = min(256, crop.width, crop.height)
+        guard size >= 16 else { return .unavailable }
+        var bytes = [UInt8](repeating: 0, count: size * size)
+        let drawn = bytes.withUnsafeMutableBytes { raw -> Bool in
+            guard let graphics = CGContext(data: raw.baseAddress, width: size, height: size,
+                bitsPerComponent: 8, bytesPerRow: size, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            graphics.interpolationQuality = .medium
+            graphics.draw(crop, in: CGRect(x: 0, y: 0, width: size, height: size)); return true
+        }
+        guard drawn, let metrics = try? GLOpenCVBridge.focusMetrics(gray: Data(bytes), width: size, height: size),
+              let mean = metrics["mean"] as? Double, let variance = metrics["variance"] as? Double,
+              let tenengrad = metrics["tenengrad"] as? Double, let laplacian = metrics["laplacianVariance"] as? Double else { return .unavailable }
+        return CentralFocusQuality(mean: mean, variance: variance, tenengrad: tenengrad, laplacianVariance: laplacian)
+    }
+    /// Full visible crop, limited to 768 on its longest edge; the central guide
+    /// is an aiming aid and never changes these pixels.
+    static func visibleImage(_ ci: CIImage, viewport: CGSize, context: CIContext) -> CGImage? {
+        guard let crop = VisibleCaptureGate.crop(source: ci.extent, viewport: viewport) else { return nil }
+        let source = ci.cropped(to: crop).transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+        let scale = min(1, 768 / max(crop.width, crop.height))
+        let reduced = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return context.createCGImage(reduced, from: CGRect(x: 0, y: 0, width: floor(crop.width * scale), height: floor(crop.height * scale)))
     }
     /// Shared by camera samples and full-size generated source frames.
     static func centralImage(_ ci: CIImage, context: CIContext) -> CGImage? {
@@ -321,4 +527,35 @@ struct CameraPreview: UIViewRepresentable {
     }
     func makeUIView(context: Context) -> Preview { let view = Preview(); view.onStabilization = onStabilization; view.preview.session = session; view.preview.videoGravity = .resizeAspectFill; return view }
     func updateUIView(_ uiView: Preview, context: Context) {}
+}
+
+/// Display the already cropped data-output pixels. No second camera output or
+/// independent stabilization/rotation transform can reveal unsent edge content.
+struct CameraVisiblePreview: UIViewRepresentable {
+    let capture: CameraCapture
+    final class Preview: UIView {
+        let capture: CameraCapture
+        init(capture: CameraCapture) {
+            self.capture = capture; super.init(frame: .zero)
+            backgroundColor = .black; layer.contentsGravity = .resizeAspect; layer.masksToBounds = true
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            capture.visibleGate.resize(bounds.size)
+        }
+    }
+    func makeUIView(context: Context) -> Preview {
+        let view = Preview(capture: capture)
+        capture.setVisiblePreview { [weak view] image, stamp in
+            MainActor.assumeIsolated {
+                guard let view, view.capture.visibleGate.markDisplayed(stamp) else { return }
+                CATransaction.begin(); CATransaction.setDisableActions(true)
+                view.layer.contents = image; CATransaction.commit()
+            }
+        }
+        return view
+    }
+    func updateUIView(_ view: Preview, context: Context) { view.capture.visibleGate.resize(view.bounds.size) }
+    static func dismantleUIView(_ view: Preview, coordinator: ()) { view.capture.setVisiblePreview(nil) }
 }

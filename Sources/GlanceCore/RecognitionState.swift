@@ -1,24 +1,77 @@
 import Foundation
 
-public struct RecognitionResult: Equatable, Hashable, Sendable {
+public struct RecognitionResult: Codable, Equatable, Hashable, Sendable {
+    public var usesEntitySearch: Bool { [14, 15, 16, 17].contains(searchContractVersion ?? -1) }
     public let names: [String]
     public let summary: String
     public let text: [String]
     public let barcodes: [String]
     public let sourceImageID: UUID?
-    public init(names: [String] = [], summary: String = "", text: [String] = [], barcodes: [String] = [], sourceImageID: UUID? = nil) {
+    public let searchContractVersion: Int?
+    public let searchCandidates: [SearchCandidate]?
+    public let searchEntities: [SearchEntity]?
+    public let entityDiagnostics: [EntitySearchDiagnostic]?
+    public let candidateQRFields: [String: String]?
+    public let candidateDiagnostics: [CandidateSearchDiagnostic]?
+    public let searchQuery: PublicSearchQuery?
+    public let searchRestriction: ManualSearchRestriction?
+    public let searchIdentity: SearchIdentity?
+    public let searchDiagnostic: SearchParseDiagnostic?
+    public let textWikipediaPolicy: SearchIdentity.WikipediaPolicy?
+    public let textWikipediaCandidates: [TextWikipediaCandidate]?
+    public let textWikipediaCandidateStatus: WikipediaCandidateStatus?
+    public let wikipediaTopics: WikipediaTopics?
+    public let wikipediaCandidateStatus: WikipediaCandidateStatus?
+    public init(names: [String] = [], summary: String = "", text: [String] = [], barcodes: [String] = [], sourceImageID: UUID? = nil, searchQuery: PublicSearchQuery? = nil, wikipediaTopics: WikipediaTopics? = nil, searchRestriction: ManualSearchRestriction? = nil, wikipediaCandidateStatus: WikipediaCandidateStatus? = nil, searchIdentity: SearchIdentity? = nil, searchDiagnostic: SearchParseDiagnostic? = nil, textWikipediaPolicy: SearchIdentity.WikipediaPolicy? = nil, textWikipediaCandidates: [TextWikipediaCandidate]? = nil, textWikipediaCandidateStatus: WikipediaCandidateStatus? = nil, searchContractVersion: Int? = nil, searchCandidates: [SearchCandidate]? = nil, candidateQRFields: [String: String]? = nil, candidateDiagnostics: [CandidateSearchDiagnostic]? = nil, searchEntities: [SearchEntity]? = nil, entityDiagnostics: [EntitySearchDiagnostic]? = nil) {
+        self.searchEntities = searchEntities; self.entityDiagnostics = entityDiagnostics
+        self.searchContractVersion = searchContractVersion; self.searchCandidates = searchCandidates
+        self.candidateQRFields = candidateQRFields; self.candidateDiagnostics = candidateDiagnostics
         self.names = names; self.summary = summary.trimmingCharacters(in: .whitespacesAndNewlines); self.text = text; self.barcodes = barcodes
-        self.sourceImageID = sourceImageID
+        self.sourceImageID = sourceImageID; self.searchQuery = searchQuery; self.wikipediaTopics = wikipediaTopics
+        self.searchRestriction = searchRestriction
+        self.wikipediaCandidateStatus = wikipediaCandidateStatus
+        self.searchIdentity = searchIdentity; self.searchDiagnostic = searchDiagnostic
+        self.textWikipediaPolicy = textWikipediaPolicy; self.textWikipediaCandidates = textWikipediaCandidates
+        self.textWikipediaCandidateStatus = textWikipediaCandidateStatus
     }
-    public func withSourceImage(_ id: UUID) -> Self { .init(names:names,summary:summary,text:text,barcodes:barcodes,sourceImageID:id) }
+    enum CodingKeys: String, CodingKey { case searchEntities, entityDiagnostics, searchContractVersion, searchCandidates, candidateQRFields, candidateDiagnostics, names, summary, text, barcodes, sourceImageID, searchQuery, wikipediaTopics, searchRestriction, wikipediaCandidateStatus, searchIdentity, searchDiagnostic, textWikipediaPolicy, textWikipediaCandidates, textWikipediaCandidateStatus }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        searchContractVersion = values.contains(.searchContractVersion) ? ((try? values.decode(Int.self, forKey: .searchContractVersion)) ?? -1) : nil
+        searchEntities = try? values.decodeIfPresent([SearchEntity].self, forKey: .searchEntities)
+        entityDiagnostics = try? values.decodeIfPresent([EntitySearchDiagnostic].self, forKey: .entityDiagnostics)
+        searchCandidates = try? values.decodeIfPresent([SearchCandidate].self, forKey: .searchCandidates)
+        candidateQRFields = try? values.decodeIfPresent([String: String].self, forKey: .candidateQRFields)
+        candidateDiagnostics = try? values.decodeIfPresent([CandidateSearchDiagnostic].self, forKey: .candidateDiagnostics)
+        names = try values.decode([String].self, forKey: .names)
+        summary = try values.decode(String.self, forKey: .summary)
+        text = try values.decode([String].self, forKey: .text)
+        barcodes = try values.decode([String].self, forKey: .barcodes)
+        sourceImageID = try values.decodeIfPresent(UUID.self, forKey: .sourceImageID)
+        searchQuery = try values.decodeIfPresent(PublicSearchQuery.self, forKey: .searchQuery)
+        if values.contains(.searchRestriction), (try? values.decodeNil(forKey: .searchRestriction)) != true {
+            searchRestriction = (try? values.decode(ManualSearchRestriction.self, forKey: .searchRestriction)) ?? .invalidRestriction
+        } else { searchRestriction = nil }
+        // Optional new hints must not make an older or damaged card unreadable.
+        searchIdentity = try? values.decodeIfPresent(SearchIdentity.self, forKey: .searchIdentity)
+        searchDiagnostic = try? values.decodeIfPresent(SearchParseDiagnostic.self, forKey: .searchDiagnostic)
+        textWikipediaPolicy = try? values.decodeIfPresent(SearchIdentity.WikipediaPolicy.self, forKey: .textWikipediaPolicy)
+        textWikipediaCandidates = try? values.decodeIfPresent([TextWikipediaCandidate].self, forKey: .textWikipediaCandidates)
+        textWikipediaCandidateStatus = try? values.decodeIfPresent(WikipediaCandidateStatus.self, forKey: .textWikipediaCandidateStatus)
+        wikipediaTopics = try? values.decodeIfPresent(WikipediaTopics.self, forKey: .wikipediaTopics)
+        wikipediaCandidateStatus = try? values.decodeIfPresent(WikipediaCandidateStatus.self, forKey: .wikipediaCandidateStatus)
+    }
+    public func withSourceImage(_ id: UUID) -> Self { .init(names:names,summary:summary,text:text,barcodes:barcodes,sourceImageID:id,searchQuery:searchQuery,wikipediaTopics:wikipediaTopics,searchRestriction:searchRestriction,wikipediaCandidateStatus:wikipediaCandidateStatus,searchIdentity:searchIdentity,searchDiagnostic:searchDiagnostic,textWikipediaPolicy:textWikipediaPolicy,textWikipediaCandidates:textWikipediaCandidates,textWikipediaCandidateStatus:textWikipediaCandidateStatus,searchContractVersion:searchContractVersion,searchCandidates:searchCandidates,candidateQRFields:candidateQRFields,candidateDiagnostics:candidateDiagnostics,searchEntities:searchEntities,entityDiagnostics:entityDiagnostics) }
+    public func withSummary(_ value: String) -> Self { .init(names:names,summary:value,text:text,barcodes:barcodes,sourceImageID:sourceImageID,searchQuery:searchQuery,wikipediaTopics:wikipediaTopics,searchRestriction:searchRestriction,wikipediaCandidateStatus:wikipediaCandidateStatus,searchIdentity:searchIdentity,searchDiagnostic:searchDiagnostic,textWikipediaPolicy:textWikipediaPolicy,textWikipediaCandidates:textWikipediaCandidates,textWikipediaCandidateStatus:textWikipediaCandidateStatus,searchContractVersion:searchContractVersion,searchCandidates:searchCandidates,candidateQRFields:candidateQRFields,candidateDiagnostics:candidateDiagnostics,searchEntities:searchEntities,entityDiagnostics:entityDiagnostics) }
+    public func withBarcodes(_ values: [String]) -> Self { .init(names:names,summary:summary,text:text,barcodes:values,sourceImageID:sourceImageID,searchQuery:searchQuery,wikipediaTopics:wikipediaTopics,searchRestriction:searchRestriction,wikipediaCandidateStatus:wikipediaCandidateStatus,searchIdentity:searchIdentity,searchDiagnostic:searchDiagnostic,textWikipediaPolicy:textWikipediaPolicy,textWikipediaCandidates:textWikipediaCandidates,textWikipediaCandidateStatus:textWikipediaCandidateStatus,searchContractVersion:searchContractVersion,searchCandidates:searchCandidates,candidateQRFields:candidateQRFields,candidateDiagnostics:candidateDiagnostics,searchEntities:searchEntities,entityDiagnostics:entityDiagnostics) }
     public var lines: [String] { (names + [summary] + text + barcodes).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
     /// Share only this immutable result, keeping existing text, Unicode and line breaks intact.
     public var shareText: String {
-        let sections: [(String?, [String])] = [(nil, names), (nil, [summary]), ("原文", text), ("條碼", barcodes)]
+        let sections: [(String?, [String])] = [(nil, names), (nil, [summary]), ("【原文】", text), ("【條碼】", barcodes)]
         return sections.compactMap { title, values in
             let present = values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             guard !present.isEmpty else { return nil }
-            return (title.map { $0 + "\n" } ?? "") + present.joined(separator: "\n")
+            return (title.map { $0 + "\n\n" } ?? "") + present.joined(separator: "\n")
         }.joined(separator: "\n\n")
     }
 }
@@ -125,6 +178,9 @@ public struct RecognitionState {
         pending.removeValue(forKey: request.target); attempted.remove(request.target)
         created.removeValue(forKey: request.target); order.removeAll { $0 == request.target }
     }
+    public mutating func interruptAcquisitionForFocus() {
+        current = nil; displaySince = nil; stableElapsed = 0; lastGate = "focus-changed"
+    }
     /// nil/empty/error is silent and deduplicated until eviction or foreground reset.
     public mutating func complete(_ request: Request, result: RecognitionResult?) {
         guard pending[request.target] == request else { return }
@@ -224,6 +280,11 @@ public struct FirstCaptureGate {
         guard pending == request, !submitted else { return }
         pending = nil; gate = "encoding-failed-or-expired"
     }
+    public mutating func releaseBeforeImageSend(_ request: Request) {
+        guard pending == request else { return }
+        if submitted { sentCount = max(0, sentCount - 1) }
+        pending = nil; submitted = false; invalidate("focus-changed-before-send")
+    }
     /// Completion is transport evidence only, never permission to show a result.
     @discardableResult public mutating func complete(_ request: Request) -> Bool {
         guard pending == request, submitted else { return false }
@@ -294,12 +355,12 @@ public struct RecognitionHistory: Sendable {
     }
     public private(set) var entries: [Entry] = []
     public var latest: Entry? { entries.last }
-    private let capacity: Int
-    public init(capacity: Int = 3) { self.capacity=max(0,capacity) }
+    private let capacity: Int?
+    public init(capacity: Int? = 3) { self.capacity=capacity.map { max(0,$0) } }
     @discardableResult public mutating func insert(_ entry: Entry) -> Bool {
         guard entry.sequence > 0, entry.capturedAt.isFinite, entry.completedAt.isFinite,
               entry.completedAt >= entry.capturedAt, !entry.result.lines.isEmpty,
-              entries.count < capacity, !entries.contains(where: { $0.id == entry.id || $0.sequence == entry.sequence }) else { return false }
+              capacity.map({ entries.count < $0 }) ?? true, !entries.contains(where: { $0.id == entry.id || $0.sequence == entry.sequence }) else { return false }
         entries.append(entry);entries.sort { $0.sequence < $1.sequence };return true
     }
     public mutating func clear() { entries.removeAll() }
@@ -317,6 +378,7 @@ public struct LiveRecognitionSession {
     public struct Request: Equatable, Sendable {
         public let intent: Intent
         public let sequence: Int
+        public let batchSequence: Int
         public let snapshotCapturedAt: TimeInterval
         public let startedAt: TimeInterval
     }
@@ -324,15 +386,20 @@ public struct LiveRecognitionSession {
     public private(set) var queuedIntent: Intent?
     public private(set) var inflightRequest: Request?
     public private(set) var history: RecognitionHistory
-    public var visible: RecognitionResult? { history.latest?.result }
+    public private(set) var references = FixedReferenceCatalog()
+    private var selectedHistoryID: UUID?
+    private var verifiedReferenceID: UUID?
+    public var visible: RecognitionResult? { history.entries.first { $0.id == visibleRequestID }?.result }
     private var displayedRequest: Request?
     private var displayedVerifiedCurrent = false
-    public var visibleRequestID: UUID? { history.latest?.id }
+    public var visibleRequestID: UUID? { selectedHistoryID ?? history.latest?.id }
     public var visibleIsPrevious: Bool {
-        visible != nil && (!displayedVerifiedCurrent || displayedRequest?.intent.generation != generation || displayedRequest?.intent.episode != stability.episode)
+        visible != nil && (!displayedVerifiedCurrent || (verifiedReferenceID != visibleRequestID && (displayedRequest?.intent.id != visibleRequestID || displayedRequest?.intent.generation != generation || displayedRequest?.intent.episode != stability.episode)))
     }
     public private(set) var adoptedCount = 0
+    /// Attempts in the current user-controlled batch. Manual pause resets only this count.
     public private(set) var sentCount = 0
+    public private(set) var lifetimeSentCount = 0
     public private(set) var completedCount = 0
     public private(set) var discardedCount = 0
     public private(set) var gate = "unobserved"
@@ -349,15 +416,17 @@ public struct LiveRecognitionSession {
     public var episode: UUID? { stability.episode }
     public var stableElapsed: TimeInterval { stability.stableElapsed }
     public var lastDistance: Float? { stability.lastDistance }
-    public init(limit: Int = 3) { self.limit = max(0, limit);history=RecognitionHistory(capacity:max(0,limit)) }
+    public init(limit: Int = 3) { self.limit = max(0, limit);history=RecognitionHistory(capacity:nil) }
 
     /// End current eligibility while retaining the last committed card in foreground.
     private mutating func clearCurrentEligibility() {
-        queuedIntent = nil; response = nil; displayedVerifiedCurrent = false
+        queuedIntent = nil; response = nil; displayedVerifiedCurrent = false; verifiedReferenceID = nil
         adoptedEpisode = nil; lastCapturedAt = nil
     }
     /// Returns a newly adopted intent even while an older transport is in flight.
-    @discardableResult public mutating func observe(_ fingerprint: SceneFingerprint?, capturedAt: TimeInterval, now: TimeInterval, sceneChangeReason: String? = nil) -> Intent? {
+    @discardableResult public mutating func observe(_ fingerprint: SceneFingerprint?, capturedAt: TimeInterval, now: TimeInterval, sceneChangeReason: String? = nil, matchingReferenceIDs: [UUID] = [], evaluatedReferenceIDs: Set<UUID>? = nil) -> Intent? {
+        references.expire(at: now)
+        if verifiedReferenceID != nil { displayedVerifiedCurrent = false; verifiedReferenceID = nil }
         let previousEpisode = stability.episode
         let previousInvalidations = stability.invalidationCount
         if let sceneChangeReason { stability.invalidate(sceneChangeReason) }
@@ -369,9 +438,22 @@ public struct LiveRecognitionSession {
         }
         guard let episode = stability.episode else { gate = stability.gate; return nil }
         lastCapturedAt = capturedAt
+        if let evaluatedReferenceIDs, evaluatedReferenceIDs != Set(references.entries.map(\.id)) {
+            if queuedIntent != nil { adoptedEpisode = nil }
+            queuedIntent = nil; gate = "awaiting-reference-evaluation"; return nil
+        }
+        if let reference = references.uniqueMatch(matchingReferenceIDs, generation: generation) {
+            if queuedIntent != nil { adoptedEpisode = nil }
+            queuedIntent = nil
+            if reference.status == .answered, history.entries.contains(where: { $0.id == reference.id }) {
+                selectedHistoryID = reference.id; verifiedReferenceID = reference.id; displayedVerifiedCurrent = true
+                gate = "fixed-reference-reused"
+            } else { gate = "same-reference-pending" }
+            return nil
+        }
         if let response, response.request.intent.generation == generation,
            response.request.intent.episode == episode, capturedAt > response.completedAt,
-           history.latest?.id == response.request.intent.id {
+           visibleRequestID == response.request.intent.id {
             displayedVerifiedCurrent = true
         }
         guard stability.stableElapsed >= stability.stableDuration else { gate = "stabilizing"; return nil }
@@ -379,28 +461,47 @@ public struct LiveRecognitionSession {
             gate = queuedIntent != nil ? "adopted-awaiting-transport" : (visible == nil ? "episode-already-adopted" : "current-result-visible")
             return nil
         }
-        guard sentCount < limit else { gate = "lifetime-request-limit"; return nil }
+        guard sentCount < limit else { gate = "batch-request-limit"; return nil }
         let intent = Intent(id: UUID(), generation: generation, episode: episode, adoptedAt: capturedAt)
         adoptedEpisode = episode; queuedIntent = intent; adoptedCount += 1
         gate = "intent-adopted"; return intent
     }
     /// Encode the latest observed frame before calling. Waiting does not retain an old JPEG.
-    public mutating func startRequest(snapshotCapturedAt: TimeInterval, at time: TimeInterval) -> Request? {
+    public mutating func startRequest(snapshotCapturedAt: TimeInterval, at time: TimeInterval, referenceAvailable: Bool = false) -> Request? {
         guard let intent = queuedIntent, inflightRequest == nil, sentCount < limit,
               intent.generation == generation, intent.episode == stability.episode,
               snapshotCapturedAt == lastCapturedAt, time.isFinite, time >= snapshotCapturedAt,
               time-snapshotCapturedAt <= stability.maximumAge else { return nil }
-        let request = Request(intent: intent, sequence: sentCount+1, snapshotCapturedAt: snapshotCapturedAt, startedAt: time)
-        queuedIntent = nil; inflightRequest = request; sentCount += 1; gate = "request-started"
+        let request = Request(intent: intent, sequence: lifetimeSentCount+1, batchSequence: sentCount+1, snapshotCapturedAt: snapshotCapturedAt, startedAt: time)
+        if referenceAvailable { references.begin(id: request.intent.id, generation: generation, capturedAt: snapshotCapturedAt, now: time) }
+        queuedIntent = nil; inflightRequest = request; sentCount += 1; lifetimeSentCount += 1; gate = "request-started"
         return request
     }
     /// Failed encoding remains deduplicated for this episode and spends no budget.
     public mutating func discardQueuedIntent() { queuedIntent = nil; gate = "encoding-failed" }
+    /// Focus loss invalidates only acquisition. Paid references/history and inflight
+    /// work belong to the same session generation and remain eligible to complete.
+    public mutating func interruptAcquisitionForFocus() {
+        stability.invalidate("focus-changed"); clearCurrentEligibility()
+        lastEpisodeReason = "focus-changed"; lastEpisodeDistance = nil; gate = "focus-changed"
+    }
+    /// Only used for a proven rejection before the image transport starts.
+    /// Sequence IDs remain monotonic; no actual sent request is refunded.
+    public mutating func releaseBeforeImageSend(_ request: Request, at time: TimeInterval) {
+        guard inflightRequest == request else { return }
+        inflightRequest = nil
+        references.complete(id: request.intent.id, generation: request.intent.generation, accepted: false, now: time)
+        if request.intent.generation == generation { sentCount = max(0, sentCount - 1) }
+        interruptAcquisitionForFocus()
+    }
     /// Success is readable as history in the same active generation. Only a later
     /// fresh same-episode frame may label the latest answer as current.
     @discardableResult public mutating func complete(_ request: Request, result: RecognitionResult?, at time: TimeInterval) -> Bool {
         guard inflightRequest == request else { lastCompletionReason = "unknown-or-duplicate-request"; return false }
         inflightRequest = nil; completedCount += 1
+        // A failed, invalid or old-generation answer must never promote a pending identity.
+        var promoteReference = false
+        defer { references.complete(id: request.intent.id, generation: request.intent.generation, accepted: promoteReference, now: time) }
         lastCompletionFrameAge = lastCapturedAt.map { time-$0 }
         expire(at: time)
         guard request.intent.generation == generation else {
@@ -411,7 +512,9 @@ public struct LiveRecognitionSession {
         guard let result, !result.lines.isEmpty else { lastCompletionReason = "empty-or-failed"; gate = "empty-or-failed"; return false }
         let entry=RecognitionHistory.Entry(id:request.intent.id,sequence:request.sequence,capturedAt:request.snapshotCapturedAt,completedAt:time,result:result)
         guard history.insert(entry) else { lastCompletionReason="duplicate-or-invalid-history";return false }
-        if history.latest?.id == request.intent.id {
+        promoteReference = true
+        if history.latest?.id == request.intent.id && !(displayedVerifiedCurrent && verifiedReferenceID != nil && verifiedReferenceID != request.intent.id) {
+            selectedHistoryID = request.intent.id; verifiedReferenceID = nil
             displayedRequest=request;displayedVerifiedCurrent=false
             response = (request, time)
         }
@@ -420,16 +523,26 @@ public struct LiveRecognitionSession {
         return true
     }
     public mutating func expire(at time: TimeInterval) {
+        references.expire(at: time)
+        if let verifiedReferenceID, !references.entries.contains(where: { $0.id == verifiedReferenceID }) {
+            self.verifiedReferenceID = nil; displayedVerifiedCurrent = false
+        }
         guard let lastCapturedAt else { return }
         if !time.isFinite || time < lastCapturedAt || time-lastCapturedAt > stability.maximumAge {
             stability.invalidate("frame-timeout"); clearCurrentEligibility(); gate = "frame-timeout"
             lastEpisodeReason = "frame-timeout"; lastEpisodeDistance = nil
         }
     }
-    public mutating func stop(preservingHistory: Bool = false) {
-        generation = UUID(); stability.stop(); clearCurrentEligibility(); gate = "stopped"
-        if !preservingHistory { history.clear();displayedRequest = nil }
+    /// Memory pressure evicts optical payload eligibility, never paid-for text.
+    /// A pending transport may still finish into history, but cannot recreate a reference.
+    public mutating func purgeReferences() {
+        references.clear(); verifiedReferenceID = nil; displayedVerifiedCurrent = false; response = nil
+    }
+    public mutating func stop(preservingHistory: Bool = false, resetBudget: Bool = false) {
+        generation = UUID(); references.clear(); stability.stop(); clearCurrentEligibility(); gate = "stopped"
+        if !preservingHistory { history.clear();displayedRequest = nil;selectedHistoryID = nil }
+        if resetBudget { sentCount = 0 }
         lastEpisodeReason = "stopped"; lastEpisodeDistance = nil
-        // Keep the actual in-flight slot and spent budget until transport returns.
+        // Keep the actual in-flight slot until transport returns. Sequence never resets.
     }
 }
