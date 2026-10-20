@@ -641,6 +641,7 @@ public struct RecognitionSemanticReview: Codable, Equatable, Sendable {
     public var requestCaptureVersion: Int?
     public var modelRequest: RecognitionModelRequest?
     public var failure: SemanticReviewFailure?
+    public var stopReason: RecognitionStopReason? = nil
     public var isPending: Bool { state == .collecting || state == .reviewing }
     public var source: WikipediaReviewSource? {
         guard state == .succeeded, let answer, answer.decision == .selected, answer.valid(sources: sources) else { return nil }

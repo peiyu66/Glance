@@ -68,7 +68,7 @@ import SwiftUI
     private(set) var wikipediaDiagnostics: [UUID: [WikipediaDiagnostic]] = [:]
     private let wikipediaNow: () -> Date
     private let scanBarcodes: @Sendable (Data) async -> SourceBarcodeScan
-    private let provider: (@MainActor (Data, UUID, @escaping () throws -> Void) async throws -> RecognitionResult)?
+    private let provider: (@MainActor (Data, UUID, @escaping () throws -> Void, @escaping () throws -> Void) async throws -> RecognitionResult)?
     private let usesSemanticReview: Bool
     private let semanticSources: @Sendable (RecognitionResult) async throws -> [WikipediaReviewSource]
     private let semanticProvider: (@MainActor (RecognitionResult, String?, [WikipediaReviewSource], @escaping () throws -> Void) async throws -> String)?
@@ -89,14 +89,30 @@ import SwiftUI
     private var requestDeadline: Task<Void, Never>?
     private let requestTimeout: Duration
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundAttempted = false
+    private var backgroundEpoch = UUID()
+    private let backgroundBegin: ((@escaping () -> Void) -> UIBackgroundTaskIdentifier)?
+    private let backgroundEnd: ((UIBackgroundTaskIdentifier) -> Void)?
+    private var pipelineOwners: [UUID: UUID] = [:]
+    private struct FirstStageWork {
+        let recordID: UUID
+        let attemptID: UUID
+        let accountIdentity: String
+        var leftActive = false
+        var submitted = false
+    }
+    private var firstStageWork: FirstStageWork?
+    private var attemptStopReasons: [UUID: RecognitionStopReason] = [:]
+    private var manualRefresh: PendingPresentation?
+    private(set) var missingImageIDs: Set<UUID> = []
     private struct Unsaved {
-        let id: UUID; let attemptID: UUID; let result: RecognitionResult?; let message: String?; let date: Date; let timedOut: Bool; let modelResponse: RecognitionModelResponse?
+        let id: UUID; let attemptID: UUID; let result: RecognitionResult?; let message: String?; let date: Date; let timedOut: Bool; let modelResponse: RecognitionModelResponse?; let stopReason: RecognitionStopReason?
     }
     private var unsaved: Unsaved?
     var canRecognize: Bool { consent.allowsTransfer && (accessOverride?() ?? account.planAccessReady) }
-    var busy: Bool { cycle.activeID != nil }
+    var busy: Bool { cycle.activeID != nil || manualRefresh != nil }
     var isSynthetic: Bool { previewStart != nil }
-    var canContinue: Bool { historyReady && storageError == nil && !deletingHistory && cycle.canContinue && canRecognize && !showingSettings && selectedPhoto == nil && !photoSelectionActive && !photoLoading }
+    var canContinue: Bool { historyReady && storageError == nil && !deletingHistory && !busy && cycle.canContinue && canRecognize && !showingSettings && selectedPhoto == nil && !photoSelectionActive && !photoLoading }
     var canStartRecognition: Bool {
         historyReady && storageError == nil && !deletingHistory && !busy && !acquiring && !openingPreview &&
         canRecognize && !account.busy && appActive && !showingSettings &&
@@ -119,17 +135,20 @@ import SwiftUI
          wikipediaReferencesLookup: @escaping @Sendable (RecognitionResult) async -> WikipediaEnrichment = { await WikipediaLookupService.shared.lookupReferences(for: $0) },
          clearWikipediaCache: @escaping @Sendable (Set<String>?) async -> Void = { await WikipediaLookupService.shared.removeCachedValues(for: $0) },
          wikipediaNow: @escaping () -> Date = { Date() },
-         provider: (@MainActor (Data, UUID, @escaping () throws -> Void) async throws -> RecognitionResult)? = nil,
+         provider: (@MainActor (Data, UUID, @escaping () throws -> Void, @escaping () throws -> Void) async throws -> RecognitionResult)? = nil,
          semanticReviewEnabled: Bool? = nil,
          semanticSources: @escaping @Sendable (RecognitionResult) async throws -> [WikipediaReviewSource] = { try await WikipediaReviewCollector().collect(for: $0) },
          semanticProvider: (@MainActor (RecognitionResult, String?, [WikipediaReviewSource], @escaping () throws -> Void) async throws -> String)? = nil,
-         loadAccount: Bool = true, requestTimeout: Duration = .seconds(120)) {
+         loadAccount: Bool = true, requestTimeout: Duration = .seconds(120),
+         backgroundBegin: ((@escaping () -> Void) -> UIBackgroundTaskIdentifier)? = nil,
+         backgroundEnd: ((UIBackgroundTaskIdentifier) -> Void)? = nil) {
         self.usesSemanticReview = semanticReviewEnabled ?? (previewStart == nil)
         self.semanticSources = semanticSources; self.semanticProvider = semanticProvider
         self.semanticAccountIdentity = account.recognitionAccountIdentity
         self.consent = consent; self.account = account; self.archive = archive; self.clock = clock; self.frameClock = frameClock
         self.permission = permission; self.previewStart = previewStart; self.previewStop = previewStop
         self.accessOverride = access; self.provider = provider; self.requestTimeout = requestTimeout
+        self.backgroundBegin = backgroundBegin; self.backgroundEnd = backgroundEnd
         if let decodeBarcodes { self.scanBarcodes = { .init(values: await decodeBarcodes($0)) } }
         else { self.scanBarcodes = scanBarcodes }
         self.wikipediaReferencesLookup = wikipediaReferencesLookup
@@ -175,15 +194,26 @@ import SwiftUI
     func resumeSetup() { showingOnboarding = true; closePreview() }
     func accountStateChanged() {
         if semanticAccountIdentity != account.recognitionAccountIdentity {
-            cancelSemanticReviews(); semanticAccountIdentity = account.recognitionAccountIdentity
+            if let attempt = activeAttemptID, let id = cycle.activeID {
+                attemptStopReasons[attempt] = .accountChanged
+                work?.cancel()
+                if records.contains(where: { $0.id == id }) {
+                    Task { await finishAttempt(id: id, attemptID: attempt, result: nil,
+                        message: "帳戶已變更；這次辨識已停止，沒有自動重送。", timedOut: false) }
+                }
+            }
+            cancelSemanticReviews(reason: .accountChanged); semanticAccountIdentity = account.recognitionAccountIdentity
         }
         consent.accountChanged(ready: accessOverride?() ?? account.planAccessReady)
         if canRecognize { showingOnboarding = false }
         else { closePreview(); invalidatePhotoSelection(); cancelWikipediaLookups() }
     }
     func withdrawDataUse() {
-        consent.withdraw(); account.cancel(); closePreview(); invalidatePhotoSelection()
-        work?.cancel(); requestDeadline?.cancel(); cancelWikipediaLookups()
+        consent.withdraw(); account.cancel()
+        cancelWikipediaLookups(reason: .consentRevoked)
+        closePreview(); invalidatePhotoSelection()
+        if let attempt = activeAttemptID { attemptStopReasons[attempt] = .consentRevoked }
+        work?.cancel(); requestDeadline?.cancel(); cancelWikipediaLookups(reason: .consentRevoked)
         if let id = cycle.activeID, let attemptID = activeAttemptID {
             Task { await finishAttempt(id: id, attemptID: attemptID, result: nil,
                 message: "已撤回同意；這次辨識已停止，原圖保留，沒有自動重送。", timedOut: false) }
@@ -194,10 +224,12 @@ import SwiftUI
         guard !busy, !deletingHistory else { return }
         let revision = historyRevision
         do {
-            let loaded = try await archive.load(recoverPending: semanticJobs.isEmpty)
+            let liveAttempts = Set([firstStageWork?.attemptID, unsaved?.attemptID].compactMap { $0 })
+            let loaded = try await archive.load(liveAttemptIDs: liveAttempts, liveSemanticRunIDs: Set(semanticJobs.values.map(\.runID)))
             guard historyRevision == revision, !deletingHistory else { return }
             onRecordsWillChange?()
             records = loaded.records; historyIssues = loaded.issues; historyReady = true
+            missingImageIDs = loaded.missingImageIDs
             deletionError = loaded.deletionIssues.isEmpty ? nil : loaded.deletionIssues.joined(separator: "\n")
             deletionCleanupPending = !loaded.deletionIssues.isEmpty
             if unsaved == nil { storageError = nil }
@@ -239,7 +271,7 @@ import SwiftUI
         defer { deletingHistory = false }
         let targets = records.filter { ids.contains($0.id) }
         for id in ids {
-            cancelSemanticReview(id: id)
+            cancelSemanticReview(id: id, reason: .deleted)
             if wikipediaTasks[id] != nil { rememberWikipedia(id, [.init(.persistence, .deleted)]) }
             wikipediaTasks.removeValue(forKey: id)?.cancel()
         }
@@ -380,19 +412,20 @@ import SwiftUI
     }
     func closePreview() { cycle.closePreview(); stopCamera() }
     func foreground(_ phase: ScenePhase) {
+        let wasActive = appActive
         appActive = phase == .active
         if appActive {
+            if !wasActive { backgroundAttempted = false; endBackgroundAllowance() }
             account.foreground()
             if unsaved != nil { Task { await retrySaving() } }
-            Task { await openPreview() }
+            // Reconcile orphaned disk markers, preserving actual live attempt/run IDs.
+            if initialized { Task { await reloadHistory() } }
         } else {
+            firstStageWork?.leftActive = true
             invalidatePhotoSelection()
-            closePreview()
-            if busy, backgroundTask == .invalid {
-                backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SaveRecognitionResult") { [weak self] in
-                    Task { @MainActor in self?.endBackgroundAllowance() }
-                }
-            }
+            requiresExplicitReopen = true
+            cycle.closePreview(); stopCamera(cancelEnrichment: false)
+            ensureBackgroundAllowance()
         }
     }
     func settingsChanged(_ shown: Bool) {
@@ -468,7 +501,7 @@ import SwiftUI
         }
         guard cycle.reserveArchived(id: photo.id) else { return }
         let id = photo.id, epoch = photoIntentEpoch
-        activeAttemptID = id; completionID = nil; readingHistory = false
+        beginFirstStage(id: id, attemptID: id); completionID = nil; readingHistory = false
         clearPhotoSelection(); photoMessage = nil
         // Show the exact prepared JPEG immediately; the durable thumbnail follows save.
         darknessClosed = false
@@ -484,7 +517,7 @@ import SwiftUI
             } catch {
                 storageError = "圖片尚未保存，沒有送出辨識。請確認儲存空間後重試。"
                 photoMessage = "相片尚未保存；恢復儲存空間後請重新選擇。"
-                activeAttemptID = nil; cycle.finish(id: id); submittedPreview = nil
+                activeAttemptID = nil; firstStageWork = nil; finishPipeline(id: id, attemptID: id); cycle.finish(id: id); submittedPreview = nil
                 work = nil; endBackgroundAllowance(); return
             }
             cycle.waiting(id: id)
@@ -496,11 +529,56 @@ import SwiftUI
             await performRequest(id: id, attemptID: id, jpeg: photo.jpeg, decoded: scan.values, searchEvidence: .init(decodedValues: scan.values, candidateScoped: true), validate: validate)
         }
     }
+    private func beginFirstStage(id: UUID, attemptID: UUID) {
+        // A foreground reload started before this reservation must not replace
+        // its new row with an older disk snapshot when the read resumes.
+        historyRevision = UUID()
+        activeAttemptID = attemptID
+        firstStageWork = .init(recordID: id, attemptID: attemptID, accountIdentity: account.recognitionAccountIdentity)
+        pipelineOwners[id] = attemptID
+    }
+    private func pipelineMayRun(id: UUID, attemptID: UUID) -> Bool {
+        pipelineOwners[id] == attemptID && (appActive || backgroundTask != .invalid)
+    }
+    private func finishPipeline(id: UUID, attemptID: UUID) {
+        if manualRefresh == .init(recordID: id, attemptID: attemptID) { manualRefresh = nil }
+        if pipelineOwners[id] == attemptID { pipelineOwners[id] = nil }
+        if pipelineOwners.isEmpty { endBackgroundAllowance() }
+    }
+    private func ensureBackgroundAllowance() {
+        guard !appActive, !pipelineOwners.isEmpty, backgroundTask == .invalid, !backgroundAttempted else { return }
+        backgroundAttempted = true
+        let epoch = UUID(); backgroundEpoch = epoch
+        let expire = { [weak self] in
+            Task { @MainActor in
+                guard self?.backgroundEpoch == epoch else { return }
+                self?.backgroundAllowanceExpired(reason: .backgroundTimeExpired)
+            }
+            return
+        }
+        backgroundTask = backgroundBegin?(expire) ?? UIApplication.shared.beginBackgroundTask(withName: "CompleteRecognitionPipeline", expirationHandler: expire)
+        if backgroundTask == .invalid { backgroundAllowanceExpired(reason: .backgroundTimeUnavailable) }
+    }
+    private func backgroundAllowanceExpired(reason: RecognitionStopReason) {
+        guard !appActive else { endBackgroundAllowance(); return }
+        // Revoke admission before cancellation/persistence can suspend.
+        pipelineOwners.removeAll()
+        if let first = firstStageWork, activeAttemptID == first.attemptID {
+            attemptStopReasons[first.attemptID] = reason
+            work?.cancel(); requestDeadline?.cancel()
+            if records.contains(where: { $0.id == first.recordID }) {
+                Task { await finishAttempt(id: first.recordID, attemptID: first.attemptID, result: nil,
+                    message: "辨識中斷，尚未完成；背景執行時間已結束，原圖保留，沒有自動重送。", timedOut: false) }
+            }
+        }
+        cancelWikipediaLookups(reason: reason)
+        endBackgroundAllowance()
+    }
     private func endBackgroundAllowance() {
         guard backgroundTask != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(backgroundTask); backgroundTask = .invalid
-        // Do not replay or discard a paid response. iOS may suspend/terminate us;
-        // the durable pending record will be marked interrupted after a cold restart.
+        let task = backgroundTask; backgroundTask = .invalid
+        backgroundEpoch = UUID()
+        if let backgroundEnd { backgroundEnd(task) } else { UIApplication.shared.endBackgroundTask(task) }
     }
     func cameraDarknessChanged(_ decision: CameraDarknessGate.Decision, generation: UUID) {
         guard appActive, previewOpen, generation == previewGeneration else { return }
@@ -584,7 +662,7 @@ import SwiftUI
             cycle.finish(id: id); status = "圖片準備失敗，請重新取景。"; return
         }
         let capturedAt = Date()
-        activeAttemptID = id; completionID = nil
+        beginFirstStage(id: id, attemptID: id); completionID = nil
         work = Task { [weak self] in
             guard let self else { return }
             let scan = await scanBarcodes(jpeg)
@@ -595,7 +673,7 @@ import SwiftUI
                 pendingPresentation = .init(recordID: id, attemptID: id)
             } catch {
                 storageError = "圖片尚未保存，沒有送出辨識。請確認儲存空間後重試。"
-                activeAttemptID = nil; cycle.finish(id: id); work = nil; endBackgroundAllowance(); return
+                activeAttemptID = nil; firstStageWork = nil; finishPipeline(id: id, attemptID: id); cycle.finish(id: id); work = nil; return
             }
             cycle.waiting(id: id)
             let validate = { [self] in
@@ -620,7 +698,10 @@ import SwiftUI
     func canRetryImage(_ record: ArchivedRecognition) -> Bool {
         historyReady && storageError == nil && unsaved == nil && !deletingHistory && !busy && !acquiring && appActive &&
             !showingSettings && selectedPhoto == nil && !photoSelectionActive && !photoLoading &&
-            canRecognize && !account.busy && record.canRetryImage
+            canRecognize && !account.busy && record.canRetryImage && !missingImageIDs.contains(record.id)
+    }
+    func missingImageReason(_ record: ArchivedRecognition) -> String? {
+        missingImageIDs.contains(record.id) ? "這筆紀錄的原圖無法讀取，不能重新辨識；既有文字仍保留。" : nil
     }
     /// Internal permit-gated replay. Copies exact saved bytes into an isolated archive;
     /// then uses the same barcode, SIWC, parser, completion and Wikipedia paths.
@@ -631,7 +712,7 @@ import SwiftUI
         // A replay is a foreground history-reading session with no live preview.
         // This preserves the ordinary enrichment admission rules for saved camera images.
         previewCollapsed = true; readingHistory = true
-        activeAttemptID = id; completionID = nil
+        beginFirstStage(id: id, attemptID: id); completionID = nil
         work = Task { [weak self] in
             guard let self else { return }
             let scan = await scanBarcodes(sample.jpeg)
@@ -644,7 +725,7 @@ import SwiftUI
                 pendingPresentation = .init(recordID: id, attemptID: id)
             } catch {
                 storageError = "回放來源或保存驗證未通過，沒有送出。"
-                activeAttemptID = nil; cycle.finish(id: id); work = nil; return
+                activeAttemptID = nil; firstStageWork = nil; finishPipeline(id: id, attemptID: pipelineOwners[id] ?? id); cycle.finish(id: id); work = nil; return
             }
             cycle.waiting(id: id)
             let validate = { [self] in
@@ -659,7 +740,10 @@ import SwiftUI
     @discardableResult func retryImage(id: UUID) -> Bool {
         guard let original = records.first(where: { $0.id == id }), canRetryImage(original),
               cycle.reserveArchived(id: id) else { return false }
-        let attemptID = UUID(); activeAttemptID = attemptID; completionID = nil
+        let attemptID = UUID()
+        cancelSemanticReview(id: id, reason: .replaced)
+        beginFirstStage(id: id, attemptID: attemptID); completionID = nil
+        manualRefresh = .init(recordID: id, attemptID: attemptID)
         readingHistory = false
         capture.setAnalysisEnabled(false)
         work = Task { [weak self] in
@@ -671,8 +755,9 @@ import SwiftUI
                 replace(pending)
                 pendingPresentation = .init(recordID: id, attemptID: attemptID)
             } catch {
-                storageError = "原圖或重試紀錄無法讀取／保存，沒有送出；原始資料保留。"
-                activeAttemptID = nil; cycle.finish(id: id); work = nil; return
+                if (try? await archive.image(for: original)) == nil { missingImageIDs.insert(id) }
+                status = "原圖或重試紀錄無法讀取／保存，沒有送出；原始資料保留。"
+                activeAttemptID = nil; firstStageWork = nil; finishPipeline(id: id, attemptID: pipelineOwners[id] ?? id); cycle.finish(id: id); work = nil; return
             }
             cycle.waiting(id: id)
             let validate = { [self] in
@@ -692,13 +777,24 @@ import SwiftUI
         let consentEpoch = consent.epoch
         let originalValidate = validate
         let validate = { [self] in
-            guard consent.allowsTransfer, consent.epoch == consentEpoch else { throw CancellationError() }
-            try originalValidate()
+            try Task.checkCancellation()
+            guard consent.allowsTransfer, consent.epoch == consentEpoch, !showingSettings,
+                  pipelineMayRun(id: id, attemptID: attemptID),
+                  activeAttemptID == attemptID, cycle.activeID == id,
+                  firstStageWork?.accountIdentity == account.recognitionAccountIdentity else { throw CancellationError() }
+            // The foreground gesture already reserved this stable saved image.
+            // After leaving active, stopping the camera must not invalidate it.
+            if firstStageWork?.leftActive != true { try originalValidate() }
+        }
+        let submitted = { [self] in
+            try validate()
+            firstStageWork?.submitted = true
         }
         requestDeadline?.cancel()
         requestDeadline = Task { [weak self, requestTimeout] in
             do { try await Task.sleep(for: requestTimeout) } catch { return }
             guard let self, self.activeAttemptID == attemptID else { return }
+            self.attemptStopReasons[attemptID] = .deadline
             self.work?.cancel()
             await self.finishAttempt(id: id, attemptID: attemptID, result: nil,
                 message: "這次辨識已逾時；原圖已保留，可重試這張圖片，或按開始辨識拍攝新目標。", timedOut: true)
@@ -710,16 +806,17 @@ import SwiftUI
         do {
             try validate(); requestCount += 1
             let received: RecognitionResult
-            if let provider { received = try await provider(jpeg, attemptID, validate).withBarcodes(decoded).withSourceImage(id) }
+            if let provider { received = try await provider(jpeg, attemptID, validate, submitted).withBarcodes(decoded).withSourceImage(id) }
             else {
                 received = try await account.recognize(jpeg: jpeg, requestID: attemptID.uuidString,
-                    searchEvidence: searchEvidence, validateBeforeImageSend: validate, capturePreparseResponse: { answer in
+                    searchEvidence: searchEvidence, validateBeforeImageSend: validate, transportStarted: submitted, capturePreparseResponse: { answer in
                         modelResponse = .capture(answer, sourceImageID: id, attemptID: attemptID,
                             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
                             appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown")
                     }).withBarcodes(decoded).withSourceImage(id)
             }
-            guard consent.allowsTransfer, consent.epoch == consentEpoch else { throw CancellationError() }
+            guard consent.allowsTransfer, consent.epoch == consentEpoch,
+                  firstStageWork?.accountIdentity == account.recognitionAccountIdentity else { throw CancellationError() }
             try Task.checkCancellation()
             result = received; message = nil
         } catch is VisibleCaptureGate.Rejection {
@@ -727,7 +824,10 @@ import SwiftUI
         } catch is CameraFocusGate.Rejection {
             result = nil; message = "送出前對焦已改變，沒有送出；可重試保存的圖片，或開始辨識新目標。"
         } catch is CancellationError {
-            result = nil; message = "這次辨識已中止；原圖已保留，沒有自動重送。"
+            result = nil
+            message = attemptStopReasons[attemptID]?.isBackgroundInterruption == true
+                ? "辨識中斷，尚未完成；背景執行時間已結束，原圖保留，沒有自動重送。"
+                : "這次辨識已中止；原圖已保留，沒有自動重送。"
         } catch {
             result = nil
             timedOut = (error as? URLError)?.code == .timedOut
@@ -739,40 +839,46 @@ import SwiftUI
         guard activeAttemptID == attemptID, cycle.activeID == id else { return }
         // Claim completion before suspension. Exactly one timer/response may own it.
         activeAttemptID = nil; requestDeadline?.cancel(); requestDeadline = nil
-        await persistCompletion(id: id, attemptID: attemptID, result: result, message: message, date: Date(), timedOut: timedOut, modelResponse: modelResponse)
+        let stopReason = attemptStopReasons.removeValue(forKey: attemptID)
+        await persistCompletion(id: id, attemptID: attemptID, result: result, message: message, date: Date(), timedOut: timedOut, modelResponse: modelResponse, stopReason: stopReason)
         if cycle.finish(id: id) { completionID = id }
         clearSubmittedPreviewIfFinished(id: id); scheduleWikipedia(for: id)
-        work = nil; endBackgroundAllowance()
+        if firstStageWork?.attemptID == attemptID { firstStageWork = nil }
+        work = nil
+        if semanticJobs[id] == nil && wikipediaTasks[id] == nil { finishPipeline(id: id, attemptID: attemptID) }
     }
-    func stopSemanticReview(id: UUID) { cancelSemanticReview(id: id) }
+    func stopSemanticReview(id: UUID) { cancelSemanticReview(id: id, reason: .manual) }
     /// The first-stage card stays unchanged while optional work saves its evidence.
     /// JSON inspection still reads the live record, not this display snapshot.
     func cardRecord(for record: ArchivedRecognition) -> ArchivedRecognition {
-        semanticCardSnapshots[record.id] ?? record
+        (semanticCardSnapshots[record.id] ?? record).displayRecord
     }
     func isSupplementPending(for record: ArchivedRecognition) -> Bool {
         record.currentSemanticReview?.isPending == true || semanticCardSnapshots[record.id] != nil
     }
-    private func cancelSemanticReviews() {
-        for id in Array(semanticJobs.keys) { cancelSemanticReview(id: id) }
+    private func cancelSemanticReviews(reason: RecognitionStopReason = .previewClosed) {
+        for id in Array(semanticJobs.keys) { cancelSemanticReview(id: id, reason: reason) }
     }
-    private func cancelSemanticReview(id: UUID) {
+    private func cancelSemanticReview(id: UUID, reason: RecognitionStopReason = .previewClosed) {
         guard let job = semanticJobs.removeValue(forKey: id) else { return }
         job.task.cancel()
         if var current = records.first(where: { $0.id == id }), current.semanticReview == nil || (current.semanticReview?.runID == job.runID && current.semanticReview?.isPending == true) {
             if current.semanticReview == nil { current.semanticReview = .init(recordID: id, attemptID: job.attemptID, runID: job.runID) }
-            current.semanticReview?.state = .cancelled; current.semanticReview?.finishedAt = Date(); replace(current)
+            current.semanticReview?.state = .cancelled; current.semanticReview?.finishedAt = Date()
+            current.semanticReview?.stopReason = reason; replace(current)
         }
         // Separate task records cancellation even though the worker is cancelled.
         Task { [weak self, archive] in
-            guard let saved = try? await archive.updateSemanticReview(id: id, attemptID: job.attemptID, runID: job.runID, state: .cancelled) else { return }
+            defer { self?.finishPipeline(id: id, attemptID: job.attemptID) }
+            guard let saved = try? await archive.updateSemanticReview(id: id, attemptID: job.attemptID, runID: job.runID, state: .cancelled, stopReason: reason) else { return }
             self?.replace(saved)
         }
     }
     private func scheduleSemanticReview(for id: UUID) {
-        guard consent.allowsTransfer, appActive, !showingSettings, unsaved == nil,
+        guard consent.allowsTransfer, !showingSettings, unsaved == nil,
               semanticJobs[id] == nil, let record = records.first(where: { $0.id == id }),
               record.status == .succeeded, record.semanticReview == nil, let result = record.result,
+              pipelineMayRun(id: id, attemptID: record.currentAttemptID),
               !WikipediaReviewCollector.queries(for: result).isEmpty else { return }
         let attempt = record.currentAttemptID, runID = UUID(), consentEpoch = consent.epoch
         let accountIdentity = account.recognitionAccountIdentity
@@ -780,10 +886,16 @@ import SwiftUI
         let capacityAvailable = semanticJobs.count < 2
         let task = Task { [weak self] in
             guard let self else { return }
-            defer { if semanticJobs[id]?.runID == runID { semanticJobs[id] = nil } }
+            defer {
+                if semanticJobs[id]?.runID == runID {
+                    semanticJobs[id] = nil
+                    finishPipeline(id: id, attemptID: attempt)
+                }
+            }
             let validate = { [self] in
                 try Task.checkCancellation()
-                guard consent.allowsTransfer, consent.epoch == consentEpoch, appActive, !showingSettings,
+                guard consent.allowsTransfer, consent.epoch == consentEpoch, !showingSettings,
+                      pipelineMayRun(id: id, attemptID: attempt),
                       account.recognitionAccountIdentity == accountIdentity,
                       let current = records.first(where: { $0.id == id }), current.currentAttemptID == attempt,
                       current.status == .succeeded, current.result == result,
@@ -795,7 +907,7 @@ import SwiftUI
             let timeout = Task { [weak self] in
                 do { try await Task.sleep(for: .seconds(70)) } catch { return }
                 guard self?.semanticJobs[id]?.runID == runID else { return }
-                self?.cancelSemanticReview(id: id)
+                self?.cancelSemanticReview(id: id, reason: .deadline)
             }
             defer { timeout.cancel() }
             do {
@@ -834,12 +946,12 @@ import SwiftUI
                         throw SemanticReviewFailure(stage: .savingRequest, code: .storage)
                     }
                 }
-                let transportStarted: () -> Void = { requestEvidence?.delivery = .submitted }
+                let transportStarted: () throws -> Void = { try validate(); requestEvidence?.delivery = .submitted }
                 let raw: String
                 failureStage = .requestingModel
                 semanticRequestCount += 1
                 if let semanticProvider {
-                    try await willSend(); try validate(); transportStarted()
+                    try await willSend(); try validate(); try transportStarted()
                     raw = try await semanticProvider(result, rawStageOne, sources, validate)
                 } else {
                     raw = try await account.reviewWikipedia(input: input, validate: validate, willSend: willSend, transportStarted: transportStarted)
@@ -893,8 +1005,8 @@ import SwiftUI
         wikipediaDiagnostics[id] = Array(events.suffix(64))
         if wikipediaDiagnostics.count > 64, let other = wikipediaDiagnostics.keys.first(where: { $0 != id }) { wikipediaDiagnostics.removeValue(forKey: other) }
     }
-    private func cancelWikipediaLookups() {
-        cancelSemanticReviews()
+    private func cancelWikipediaLookups(reason: RecognitionStopReason = .previewClosed) {
+        cancelSemanticReviews(reason: reason)
         let outcome: WikipediaDiagnostic.Outcome = !consent.allowsTransfer ? .consentRevoked : !appActive ? .background : .cancelled
         for id in wikipediaTasks.keys { rememberWikipedia(id, [.init(.persistence, outcome)]) }
         wikipediaEpoch = UUID()
@@ -926,7 +1038,10 @@ import SwiftUI
             else if let subject { enrichment = .init(subject: await wikipediaLookup(subject)) }
             else { return }
             guard let self else { return }
-            defer { if self.wikipediaEpoch == epoch { self.wikipediaTasks[id] = nil } }
+            defer {
+                if self.wikipediaEpoch == epoch { self.wikipediaTasks[id] = nil }
+                self.finishPipeline(id: id, attemptID: attempt)
+            }
             guard !Task.isCancelled, self.consent.allowsTransfer, self.wikipediaEpoch == epoch, self.appActive,
                   !self.showingSettings, enrichment.subject != nil || !enrichment.text.isEmpty || !enrichment.diagnostics.isEmpty,
                   let current = self.records.first(where: { $0.id == id }), current.status == .succeeded,
@@ -959,12 +1074,12 @@ import SwiftUI
             submittedPreview = nil
         }
     }
-    private func persistCompletion(id: UUID, attemptID: UUID, result: RecognitionResult?, message: String?, date: Date, timedOut: Bool, modelResponse: RecognitionModelResponse? = nil) async {
+    private func persistCompletion(id: UUID, attemptID: UUID, result: RecognitionResult?, message: String?, date: Date, timedOut: Bool, modelResponse: RecognitionModelResponse? = nil, stopReason: RecognitionStopReason? = nil) async {
         do {
-            let record = try await archive.complete(id: id, result: result, message: message, at: date, attemptID: attemptID, timedOut: timedOut, modelResponse: modelResponse)
+            let record = try await archive.complete(id: id, result: result, message: message, at: date, attemptID: attemptID, timedOut: timedOut, modelResponse: modelResponse, stopReason: stopReason)
             replace(record); unsaved = nil; storageError = nil
         } catch {
-            unsaved = Unsaved(id: id, attemptID: attemptID, result: result, message: message, date: date, timedOut: timedOut, modelResponse: modelResponse)
+            unsaved = Unsaved(id: id, attemptID: attemptID, result: result, message: message, date: date, timedOut: timedOut, modelResponse: modelResponse, stopReason: stopReason)
             if let index = records.firstIndex(where: { $0.id == id }) {
                 onRecordsWillChange?()
                 records[index].result = result?.withSourceImage(id)
@@ -980,6 +1095,9 @@ import SwiftUI
             let current = records[index]
             guard record.attemptNumber >= current.attemptNumber,
                   record.attemptNumber != current.attemptNumber || record.currentAttemptID == current.currentAttemptID else { return }
+            // Archive reads and writes resume independently on the main actor.
+            // Reject an in-flight reload if a newer attempt/stage has published.
+            historyRevision = UUID()
             var merged = record
             // Independent archive writes may resume on the main actor out of order.
             // Enrichment never clears another source or rolls a terminal AI result back.
@@ -988,18 +1106,21 @@ import SwiftUI
                     merged.semanticReview = old
                 } else { merged.semanticReview = record.semanticReview ?? current.semanticReview }
             }
-            merged.wikipedia = record.wikipedia ?? current.wikipedia
-            merged.wikipediaDiagnostics = record.wikipediaDiagnostics ?? current.wikipediaDiagnostics
+            if record.currentAttemptID == current.currentAttemptID {
+                merged.wikipedia = record.wikipedia ?? current.wikipedia
+                merged.wikipediaDiagnostics = record.wikipediaDiagnostics ?? current.wikipediaDiagnostics
+                merged.textWikipedia = record.textWikipedia ?? current.textWikipedia
+            }
             merged.modelResponses = record.modelResponses ?? current.modelResponses
-            merged.textWikipedia = record.textWikipedia ?? current.textWikipedia
             merged.productFacts = record.productFacts ?? current.productFacts
             if record.currentAttemptID == current.currentAttemptID && record.status == .pending && current.status != .pending {
                 merged.status = current.status; merged.result = current.result
                 merged.message = current.message; merged.completedAt = current.completedAt
+                merged.retainedSuccess = current.retainedSuccess; merged.modelResponses = current.modelResponses
             }
             let before = cardRecord(for: current)
             if current.status == .pending, merged.status == .succeeded, usesSemanticReview,
-               consent.allowsTransfer, appActive, !showingSettings,
+               consent.allowsTransfer, pipelineMayRun(id: record.id, attemptID: record.currentAttemptID), !showingSettings,
                let result = merged.result, !WikipediaReviewCollector.queries(for: result).isEmpty {
                 semanticCardSnapshots[record.id] = merged
             }
@@ -1020,7 +1141,7 @@ import SwiftUI
     }
     func retrySaving() async {
         if let value = unsaved {
-            await persistCompletion(id: value.id, attemptID: value.attemptID, result: value.result, message: value.message, date: value.date, timedOut: value.timedOut, modelResponse: value.modelResponse)
+            await persistCompletion(id: value.id, attemptID: value.attemptID, result: value.result, message: value.message, date: value.date, timedOut: value.timedOut, modelResponse: value.modelResponse, stopReason: value.stopReason)
             clearSubmittedPreviewIfFinished(id: value.id)
         } else { await reloadHistory() }
     }
@@ -1032,6 +1153,7 @@ import SwiftUI
         }
         catch {
             guard records.contains(where: { $0.id == record.id }) else { return nil }
+            missingImageIDs.insert(record.id)
             let message = "來源圖片無法讀取，文字及原始檔案均保留。"
             if !historyIssues.contains(message) { historyIssues.append(message) }
             return nil

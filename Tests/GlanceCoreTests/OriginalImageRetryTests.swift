@@ -16,7 +16,7 @@ private func retryTestRoot() -> URL {
     let pending = try await archive.beginRetry(id: id, attemptID: attempt, at: captured.addingTimeInterval(60))
     #expect(pending.status == .pending && !pending.canRetryImage && !pending.canShare)
     let result = try await archive.complete(id: id, result: .init(names: ["重試成功"], barcodes: ["untrusted"]), message: nil, attemptID: attempt)
-    #expect(result.status == .succeeded && !result.canRetryImage)
+    #expect(result.status == .succeeded && result.canRetryImage)
     #expect(result.id == original.id && result.sequence == original.sequence && result.capturedAt == captured)
     #expect(result.imageSHA256 == original.imageSHA256 && result.imageByteCount == image.count)
     #expect(result.result?.sourceImageID == id && result.result?.barcodes == ["00123"])

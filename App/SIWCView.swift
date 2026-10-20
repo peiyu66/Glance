@@ -422,7 +422,7 @@ import Observation
         }
     }
     /// Camera provider uses the same Keychain account and serialized refresh path.
-    func recognize(jpeg: Data, requestID: String? = nil, searchEvidence: BarcodeSearchEvidence? = nil, validateBeforeImageSend: (() throws -> Void)? = nil, capturePreparseResponse: ((String) -> Void)? = nil) async throws -> RecognitionResult {
+    func recognize(jpeg: Data, requestID: String? = nil, searchEvidence: BarcodeSearchEvidence? = nil, validateBeforeImageSend: (() throws -> Void)? = nil, transportStarted: (() throws -> Void)? = nil, capturePreparseResponse: ((String) -> Void)? = nil) async throws -> RecognitionResult {
         let callerValidation = validateBeforeImageSend
         let consentEpoch = dataTransferRevision()
         let validateBeforeImageSend = { [self] in
@@ -442,7 +442,7 @@ import Observation
             }
             try Task.checkCancellation()
             let body = try CameraAnswer.request(model: "gpt-6-luna", catalog: catalog, jpeg: jpeg, searchEvidence: searchEvidence)
-            let answer = try await SIWCHTTP.shared.stream(body: body, bearer: tokens.access, operation: "camera-image", cameraRequestID: requestID, validateBeforeImageSend: validateBeforeImageSend)
+            let answer = try await SIWCHTTP.shared.stream(body: body, bearer: tokens.access, operation: "camera-image", cameraRequestID: requestID, validateBeforeImageSend: validateBeforeImageSend, transportStarted: transportStarted)
             try Task.checkCancellation()
             guard allowsDataTransfer(), dataTransferRevision() == consentEpoch else { throw CancellationError() }
             capturePreparseResponse?(answer)
@@ -456,7 +456,7 @@ import Observation
     /// already-usable session. It never races a rotating refresh token or starts auth.
     var recognitionAccountIdentity: String { selectedID + ":" + (account?.authenticationTraceID?.uuidString ?? "none") }
     func reviewWikipedia(input: Data, validate: @escaping () throws -> Void,
-                         willSend: @escaping () async throws -> Void, transportStarted: @escaping () -> Void) async throws -> String {
+                         willSend: @escaping () async throws -> Void, transportStarted: @escaping () throws -> Void) async throws -> String {
         let identity = recognitionAccountIdentity, epoch = dataTransferRevision()
         let validateRequest = { [self] in
             try Task.checkCancellation(); try validate()

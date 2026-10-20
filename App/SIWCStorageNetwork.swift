@@ -271,7 +271,7 @@ struct SIWCHTTPError: Error {
         #endif
     }
 
-    func stream(body: Data, bearer: String, operation: String = "synthetic-image", cameraRequestID: String? = nil, validateBeforeImageSend: (() throws -> Void)? = nil, observeResponse: ((SIWCServiceDiagnostic) -> Void)? = nil, transportStarted: (() -> Void)? = nil) async throws -> String {
+    func stream(body: Data, bearer: String, operation: String = "synthetic-image", cameraRequestID: String? = nil, validateBeforeImageSend: (() throws -> Void)? = nil, observeResponse: ((SIWCServiceDiagnostic) -> Void)? = nil, transportStarted: (() throws -> Void)? = nil) async throws -> String {
         #if GLANCE_READINESS_DIAGNOSTIC
         throw SIWCReadinessNetworkDisabled()
         #else
@@ -282,7 +282,7 @@ struct SIWCHTTPError: Error {
         // Token/catalog awaits may have outlived the captured focus generation.
         // This is the final pre-transport boundary; later focus changes retain inflight work.
         try validateBeforeImageSend?()
-        transportStarted?()
+        try transportStarted?()
         let (bytes, response) = try await session.bytes(for: request)
         diagnostics["headersMilliseconds"] = elapsed()
         guard let http = response as? HTTPURLResponse else { throw SIWCError.invalidResponse }

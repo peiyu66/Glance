@@ -264,7 +264,8 @@ struct SingleCaptureView: View {
                                         showsPendingProgress: false,
                                         image: { await model.image(for: record) },
                                         onOpen: { enlargedImage = $0 }, shareProbe: shareProbe, showsModelJSON: showsModelJSON,
-                                        retryEnabled: model.canRetryImage(record), onRetry: { _ = model.retryImage(id: record.id) })
+                                        retryEnabled: model.canRetryImage(record), onRetry: { _ = model.retryImage(id: record.id) },
+                                        refreshNotice: record.retainedResultNotice, missingImageReason: model.missingImageReason(record))
                                         .id(record.id)
                                         .listRowInsets(EdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12))
                                         .listRowSeparator(.hidden)
@@ -705,7 +706,7 @@ struct RecognitionPendingBadge: View {
 private extension ArchivedRecognition {
     // Both row actions use the completed first-stage record, independently of
     // optional encyclopedia work or whether legacy raw JSON was saved.
-    var firstStageActionsEnabled: Bool { status == .succeeded && canShare }
+    var firstStageActionsEnabled: Bool { (status == .succeeded || retainedSuccess != nil) && canShare }
 }
 
 struct ArchivedRecognitionRow: View {
@@ -719,6 +720,8 @@ struct ArchivedRecognitionRow: View {
     var showsModelJSON = false
     var retryEnabled = false
     var onRetry: (() -> Void)? = nil
+    var refreshNotice: String? = nil
+    var missingImageReason: String? = nil
     @State private var jpeg: Data?
     @State private var originalExpanded = false
     private struct JSONSnapshot: Identifiable {
@@ -732,9 +735,15 @@ struct ArchivedRecognitionRow: View {
     @State private var jsonSnapshot: JSONSnapshot?
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var actionWidth: CGFloat { dynamicTypeSize.isAccessibilitySize ? 64 : 44 }
+    private var actionHeight: CGFloat { dynamicTypeSize.isAccessibilitySize ? 64 : 36 }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
+            let headerLayout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+            headerLayout {
+              HStack(alignment: .top, spacing: 12) {
                 if let jpeg {
                     RecognitionSourceThumbnail(snapshot: .init(id: record.id, jpeg: jpeg, allowsImageSharing: record.status == .succeeded), onOpenImage: onOpen)
                 } else { Image(systemName: "photo").frame(width: 64, height: 64).foregroundStyle(.secondary) }
@@ -752,18 +761,29 @@ struct ArchivedRecognitionRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("archiveTimestamp-\(record.sequence)")
                 }
-                Spacer(minLength: 0)
+              }.frame(maxWidth: .infinity, alignment: .leading)
+              HStack(spacing: 12) {
                 if showsModelJSON {
                     Button("JSON") {
                         guard let current = currentRecord(), current.id == record.id, current.firstStageActionsEnabled else { return }
-                        jsonSnapshot = .init(id: current.id, attempt: current.attemptNumber, document: current.modelJSONDocument, secondStage: current.semanticJSONDocument, secondRequest: current.semanticRequestJSONDocument, combinedShareText: current.combinedJSONShareText)
+                        jsonSnapshot = .init(id: current.id, attempt: current.displayRecord.attemptNumber, document: current.modelJSONDocument, secondStage: current.semanticJSONDocument, secondRequest: current.semanticRequestJSONDocument, combinedShareText: current.combinedJSONShareText)
                     }
                     .font(.caption.monospaced().weight(.semibold))
                     .foregroundStyle(record.firstStageActionsEnabled ? Color.blue : Color.gray)
-                    .buttonStyle(.plain).frame(minWidth: 44, minHeight: 36)
+                    .buttonStyle(.plain).frame(minWidth: actionWidth, minHeight: actionHeight)
                     .disabled(!record.firstStageActionsEnabled)
                     .accessibilityLabel("查看第 \(record.sequence) 筆原始 JSON")
                     .accessibilityIdentifier("modelJSON-\(record.sequence)")
+                }
+                if let onRetry {
+                    Button(action: onRetry) { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(retryEnabled && jpeg != nil ? Color.blue : Color.gray)
+                        .frame(width: actionWidth, height: actionHeight)
+                        .disabled(!retryEnabled || jpeg == nil)
+                        .accessibilityLabel("重新辨識這張圖片")
+                        .accessibilityHint(missingImageReason ?? "使用這筆紀錄的原圖，從第一階段重新辨識。")
+                        .accessibilityIdentifier("refreshRecognition-\(record.sequence)")
                 }
                 if record.firstStageActionsEnabled {
                     RecognitionShareButton(text: record.shareText(), imageAvailable: jpeg != nil, probe: shareProbe, snapshot: {
@@ -771,15 +791,16 @@ struct ArchivedRecognitionRow: View {
                         let document = current.shareDocument()
                         return .init(text: document.plainText, jpeg: jpeg, document: document)
                     })
-                        .frame(width: 44, height: 36)
+                        .frame(width: actionWidth, height: actionHeight)
                         .disabled(record.shareText().isEmpty && jpeg == nil)
                 } else {
                     Button {} label: { Image(systemName: "square.and.arrow.up") }
                         .buttonStyle(.plain).foregroundStyle(.gray)
-                        .frame(width: 44, height: 36).disabled(true)
+                        .frame(width: actionWidth, height: actionHeight).disabled(true)
                         .accessibilityLabel("完成辨識後可分享")
                         .accessibilityIdentifier("shareRecognitionResult")
                 }
+              }
             }
             if !record.barcodes.isEmpty {
                 Text("【條碼】\n\n" + record.barcodes.joined(separator: "\n"))
@@ -833,7 +854,9 @@ struct ArchivedRecognitionRow: View {
             }
             if record.attemptNumber > 1 { Text("第 \(record.attemptNumber) 次嘗試").font(.caption).foregroundStyle(.secondary) }
             if let message = record.message { Text(message).font(.subheadline).foregroundStyle(.secondary) }
-            if record.canRetryImage, let onRetry {
+            if let refreshNotice { Text(refreshNotice).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("refreshNotice-\(record.sequence)") }
+            if let missingImageReason { Text(missingImageReason).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("refreshMissingImage-\(record.sequence)") }
+            if record.status == .failed || record.status == .interrupted, let onRetry {
                 Button("重試這張圖片", action: onRetry).buttonStyle(.bordered)
                     .disabled(!retryEnabled || jpeg == nil)
                     .accessibilityIdentifier("retryImage-\(record.sequence)")

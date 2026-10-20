@@ -1,6 +1,15 @@
 import Foundation
 import CryptoKit
 
+/// Local lifecycle evidence, separate from a model's answer or network receipt.
+public enum RecognitionStopReason: String, Codable, Sendable {
+    case backgroundTimeExpired, backgroundTimeUnavailable, deadline
+    case manual, previewClosed, consentRevoked, accountChanged, deleted, replaced, processInterrupted
+    public var isBackgroundInterruption: Bool {
+        self == .backgroundTimeExpired || self == .backgroundTimeUnavailable || self == .processInterrupted
+    }
+}
+
 /// Local diagnostic evidence. Never included in search or ordinary result sharing.
 /// The explicitly enabled JSON viewer can display/share only the current attempt's raw response.
 /// At most 32 KiB of exact pre-parser response per attempt; oversize input retains metadata only.
@@ -145,18 +154,48 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
         public let startedAt: Date
         public var outcome: Outcome
         public var completedAt: Date?
+        public var stopReason: RecognitionStopReason? = nil
     }
     /// Optional for v1 compatibility. The JPEG, record ID and capture date never change.
     public var attempts: [Attempt]? = nil
     public enum ImageSource: String, Codable, Sendable { case camera, photoLibrary }
     /// Missing on older records, which were all captured in the app.
     public var imageSource: ImageSource? = nil
+    /// One prior successful attempt, retained only while a manual rerun has no
+    /// successful first-stage replacement. No image copy or recursive archive.
+    public struct RetainedSuccess: Codable, Equatable, Sendable {
+        public let result: RecognitionResult
+        public let attempts: [Attempt]?
+        public let completedAt: Date?
+        public let wikipedia: WikipediaReference?
+        public let textWikipedia: [TextWikipediaReference]?
+        public let wikipediaDiagnostics: [WikipediaDiagnostic]?
+        public let semanticReview: RecognitionSemanticReview?
+        public let modelResponses: [RecognitionModelResponse]?
+    }
+    public var retainedSuccess: RetainedSuccess? = nil
+    public var displayRecord: ArchivedRecognition {
+        guard status != .succeeded, let retainedSuccess else { return self }
+        var display = self
+        display.retainedSuccess = nil
+        display.status = .succeeded; display.result = retainedSuccess.result; display.message = nil
+        display.attempts = retainedSuccess.attempts; display.completedAt = retainedSuccess.completedAt
+        display.wikipedia = retainedSuccess.wikipedia; display.textWikipedia = retainedSuccess.textWikipedia
+        display.wikipediaDiagnostics = retainedSuccess.wikipediaDiagnostics
+        display.semanticReview = retainedSuccess.semanticReview; display.modelResponses = retainedSuccess.modelResponses
+        return display
+    }
+    public var retainedResultNotice: String? {
+        guard status != .succeeded, retainedSuccess != nil else { return nil }
+        return status == .pending ? "重新辨識中，暫時顯示上次成功結果。" : "重新辨識未完成，保留上次成功結果；可再次手動重新辨識。"
+    }
     public var source: ImageSource { imageSource ?? .camera }
     public var currentAttemptID: UUID { attempts?.last?.id ?? id }
     public var attemptNumber: Int { attempts?.count ?? 1 }
-    public var canRetryImage: Bool { status == .failed || status == .interrupted }
+    public var canRetryImage: Bool { status != .pending }
     public var barcodes: [String] { decodedBarcodes ?? result?.barcodes ?? [] }
     public var googleSearch: GoogleSearchQuery? {
+        if status != .succeeded, retainedSuccess != nil { return displayRecord.googleSearch }
         guard status != .pending else { return nil }
         if let review = currentSemanticReview, let answer = review.answer, answer.relationship != .contextual, review.source != nil,
            let query = GoogleSearchQuery.reviewedName(answer.searchName) { return query }
@@ -175,6 +214,7 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
     }
     /// A display projection; the archived first-stage result and raw response never change.
     public var presentationResult: RecognitionResult? {
+        if status != .succeeded, retainedSuccess != nil { return displayRecord.presentationResult }
         guard let result else { return nil }
         guard let review = currentSemanticReview, review.source != nil, let answer = review.answer else { return result }
         if answer.relationship == .contextual {
@@ -183,6 +223,7 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
         return result.withSummary(answer.summary)
     }
     public var semanticJSONDocument: RecognitionJSONDocument? {
+        if status != .succeeded, retainedSuccess != nil { return displayRecord.semanticJSONDocument }
         guard let review = currentSemanticReview else { return nil }
         guard let response = review.modelResponse else {
             let failure = review.failure.map { "\n診斷：" + $0.stage.rawValue + " / " + $0.code.rawValue + ($0.status.map { "（\($0)）" } ?? "") } ?? ""
@@ -195,6 +236,7 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
             version: response.appVersion + "（" + response.appBuild + "）", promptRevision: response.promptRevision)
     }
     public var semanticRequestJSONDocument: RecognitionJSONDocument {
+        if status != .succeeded, retainedSuccess != nil { return displayRecord.semanticRequestJSONDocument }
         guard let review = currentSemanticReview else {
             if status == .succeeded, let result, result.searchContractVersion == 17, WikipediaReviewCollector.queries(for: result).isEmpty {
                 let proposed = result.searchEntities ?? []
@@ -223,6 +265,10 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
             message: request.message, version: request.appVersion + "（" + request.appBuild + "）", promptRevision: request.promptRevision)
     }
     public var combinedJSONShareText: String {
+        if let notice = retainedResultNotice {
+            return notice + "\n以下為上次成功嘗試 " + displayRecord.currentAttemptID.uuidString
+                + "；本次嘗試 " + currentAttemptID.uuidString + " 尚未取代它。\n\n" + displayRecord.combinedJSONShareText
+        }
         let reply = semanticJSONDocument ?? .unavailable("本次未保存第二階段回覆。")
         func section(_ title: String, _ document: RecognitionJSONDocument, includeState: Bool = false) -> String {
             if let raw = document.rawText { return title + "\n" + (includeState ? document.message + "\n\n" : "") + raw }
@@ -232,8 +278,14 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
                 section("第二階段請求", semanticRequestJSONDocument, includeState: true),
                 section("第二階段回覆", reply)].joined(separator: "\n\n")
     }
-    public var canShare: Bool { status != .pending && shareResult != nil }
+    public var canShare: Bool { (status != .pending || retainedSuccess != nil) && shareResult != nil }
     public var modelJSONDocument: RecognitionJSONDocument {
+        if let notice = retainedResultNotice {
+            let old = displayRecord.modelJSONDocument
+            return .init(rawText: old.rawText, formattedText: old.formattedText,
+                message: notice + "\n以下為上次成功嘗試 " + displayRecord.currentAttemptID.uuidString + " 的原始回覆。\n" + old.message,
+                version: old.version, promptRevision: old.promptRevision)
+        }
         guard status != .pending else { return .unavailable("辨識尚未完成，尚無本次原始 JSON。") }
         guard let response = modelResponses?.last(where: { $0.attemptID == currentAttemptID && $0.sourceImageID == id }) else {
             return .unavailable("本次嘗試未保存原始 JSON，無法從解析結果還原。")
@@ -253,6 +305,7 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
     }
     /// Resolve current valid links once; callers freeze this document at the share tap.
     public func shareDocument(at date: Date = Date()) -> RecognitionShareDocument {
+        if status != .succeeded, retainedSuccess != nil { return displayRecord.shareDocument(at: date) }
         guard canShare, let result = shareResult else { return .init(body: "") }
         var links: [RecognitionShareDocument.Link] = []
         if let query = googleSearch, let url = query.googleURL {
@@ -281,7 +334,7 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
 extension ArchivedRecognition {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, id, sequence, capturedAt, imageSHA256, imageByteCount
-        case status, result, message, completedAt, decodedBarcodes, wikipedia, textWikipedia, wikipediaDiagnostics, modelResponses, semanticReview, productBarcodes, productFacts, barcodeDiagnostics, attempts, imageSource
+        case status, result, message, completedAt, decodedBarcodes, wikipedia, textWikipedia, wikipediaDiagnostics, modelResponses, semanticReview, productBarcodes, productFacts, barcodeDiagnostics, attempts, imageSource, retainedSuccess
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -306,6 +359,12 @@ extension ArchivedRecognition {
         barcodeDiagnostics = try? c.decodeIfPresent(SourceBarcodeDiagnostics.self, forKey: .barcodeDiagnostics)
         attempts = try c.decodeIfPresent([Attempt].self, forKey: .attempts)
         imageSource = try c.decodeIfPresent(ImageSource.self, forKey: .imageSource)
+        if let retained = try? c.decodeIfPresent(RetainedSuccess.self, forKey: .retainedSuccess),
+           retained.result.sourceImageID == id,
+           let prior = retained.attempts?.last, prior.outcome == .succeeded,
+           attempts?.contains(where: { $0.id == prior.id && $0.outcome == .succeeded }) == true {
+            retainedSuccess = retained
+        }
     }
 }
 
@@ -316,6 +375,7 @@ public actor RecognitionArchive {
         public let records: [ArchivedRecognition]
         public let issues: [String]
         public let deletionIssues: [String]
+        public let missingImageIDs: Set<UUID>
     }
     public enum Failure: Error, Equatable { case invalidRecord, missingImage, duplicateID, invalidCompletion, recognitionInProgress }
     public struct Deletion: Sendable {
@@ -369,10 +429,10 @@ public actor RecognitionArchive {
               value.status != .succeeded || value.result != nil else { throw Failure.invalidRecord }
         return value
     }
-    public func load(recoverPending: Bool = true) throws -> Loaded {
+    public func load(recoverPending: Bool = true, liveAttemptIDs: Set<UUID> = [], liveSemanticRunIDs: Set<UUID> = []) throws -> Loaded {
         try ensureRoot()
         let deletionIssues = cleanupDeleted()
-        var records: [ArchivedRecognition] = [], issues: [String] = []
+        var records: [ArchivedRecognition] = [], issues: [String] = [], missingImageIDs = Set<UUID>()
         for folder in try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
             guard let id = UUID(uuidString: folder.lastPathComponent) else { continue }
             do {
@@ -381,26 +441,28 @@ public actor RecognitionArchive {
                 var record = try read(id)
                 // Reserve sequence even if an image is damaged; never renumber existing rows.
                 nextSequence = max(nextSequence, record.sequence + 1)
-                if recoverPending && record.status == .pending {
-                    record.status = .interrupted; record.message = "上次辨識未完成；原圖已保留，可重試這張圖片，沒有自動重送。"; record.completedAt = Date()
+                if recoverPending && record.status == .pending && !liveAttemptIDs.contains(record.currentAttemptID) {
+                    record.status = .interrupted; record.message = "辨識中斷，尚未完成；原圖已保留，可手動重試，沒有自動重送。"; record.completedAt = Date()
                     if let index = record.attempts?.indices.last {
                         record.attempts?[index].outcome = .interrupted; record.attempts?[index].completedAt = record.completedAt
+                        record.attempts?[index].stopReason = .processInterrupted
                     }
                     do { try write(encode(record), to: folder.appendingPathComponent("record.json")) }
                     catch { issues.append("有一筆中斷狀態尚未保存，原資料保留。") }
                 }
-                if recoverPending && record.semanticReview?.isPending == true {
+                if recoverPending && record.semanticReview?.isPending == true && !liveSemanticRunIDs.contains(record.semanticReview!.runID) {
                     record.semanticReview?.state = .interrupted; record.semanticReview?.finishedAt = Date()
+                    record.semanticReview?.stopReason = .processInterrupted
                     do { try write(encode(record), to: folder.appendingPathComponent("record.json")) }
                     catch { issues.append("有一筆百科補充中斷狀態尚未保存，原始辨識保留。") }
                 }
                 do { _ = try imageURL(for: record) }
-                catch { issues.append("有一筆來源圖片無法讀取，文字及原始檔案均保留。") }
+                catch { missingImageIDs.insert(record.id); issues.append("有一筆來源圖片無法讀取，文字及原始檔案均保留。") }
                 records.append(record)
             } catch { issues.append("有一筆歷史無法讀取，未覆蓋或刪除原始檔案。") }
         }
         loaded = true
-        return Loaded(records: records.sorted { $0.sequence > $1.sequence }, issues: issues, deletionIssues: deletionIssues)
+        return Loaded(records: records.sorted { $0.sequence > $1.sequence }, issues: issues, deletionIssues: deletionIssues, missingImageIDs: missingImageIDs)
     }
     public func create(id: UUID, jpeg: Data, capturedAt: Date, decodedBarcodes: [String]? = nil, productBarcodes: [ProductBarcode]? = nil, barcodeDiagnostics: SourceBarcodeDiagnostics? = nil, imageSource: ArchivedRecognition.ImageSource = .camera) throws -> ArchivedRecognition {
         if !loaded { _ = try load() }
@@ -433,7 +495,12 @@ public actor RecognitionArchive {
         _ = try image(for: record)
         if record.attempts == nil {
             record.attempts = [.init(id: id, startedAt: record.capturedAt,
-                outcome: record.status == .interrupted ? .interrupted : .failed, completedAt: record.completedAt)]
+                outcome: record.status == .succeeded ? .succeeded : record.status == .interrupted ? .interrupted : .failed, completedAt: record.completedAt)]
+        }
+        if record.status == .succeeded, let result = record.result {
+            record.retainedSuccess = .init(result: result, attempts: record.attempts, completedAt: record.completedAt,
+                wikipedia: record.wikipedia, textWikipedia: record.textWikipedia, wikipediaDiagnostics: record.wikipediaDiagnostics,
+                semanticReview: record.semanticReview, modelResponses: record.modelResponses)
         }
         record.attempts?.append(.init(id: attemptID, startedAt: date, outcome: .pending))
         record.status = .pending; record.result = nil; record.message = nil; record.completedAt = nil
@@ -442,7 +509,8 @@ public actor RecognitionArchive {
         return record
     }
     public func complete(id: UUID, result: RecognitionResult?, message: String?, at date: Date = Date(),
-                         attemptID: UUID? = nil, timedOut: Bool = false, modelResponse: RecognitionModelResponse? = nil) throws -> ArchivedRecognition {
+                         attemptID: UUID? = nil, timedOut: Bool = false, modelResponse: RecognitionModelResponse? = nil,
+                         stopReason: RecognitionStopReason? = nil) throws -> ArchivedRecognition {
         var record = try read(id)
         guard record.status == .pending, record.currentAttemptID == (attemptID ?? id) else { return record }
         if let modelResponse {
@@ -451,13 +519,18 @@ public actor RecognitionArchive {
         }
         // Each attempt is terminal once. Late replies cannot finish a newer attempt.
         if let result {
+            record.retainedSuccess = nil
             record.result = result.withBarcodes(record.decodedBarcodes ?? result.barcodes).withSourceImage(id)
             record.status = .succeeded; record.message = nil
-        } else { record.status = .failed; record.message = message ?? "辨識未完成；原圖已保留，可重試這張圖片。" }
+        } else {
+            record.status = stopReason?.isBackgroundInterruption == true ? .interrupted : .failed
+            record.message = message ?? "辨識未完成；原圖已保留，可重試這張圖片。"
+        }
         record.completedAt = date
         if let index = record.attempts?.indices.last {
-            record.attempts?[index].outcome = result != nil ? .succeeded : timedOut ? .timedOut : .failed
+            record.attempts?[index].outcome = result != nil ? .succeeded : stopReason?.isBackgroundInterruption == true ? .interrupted : timedOut ? .timedOut : .failed
             record.attempts?[index].completedAt = date
+            record.attempts?[index].stopReason = result == nil ? stopReason : nil
         }
         try write(encode(record), to: directory(id).appendingPathComponent("record.json"))
         return record
@@ -526,7 +599,8 @@ public actor RecognitionArchive {
         return record
     }
     public func updateSemanticReview(id: UUID, attemptID: UUID, runID: UUID, state: RecognitionSemanticReview.State,
-        sources: [WikipediaReviewSource]? = nil, answer: WikipediaReviewAnswer? = nil, response: RecognitionModelResponse? = nil, failure: SemanticReviewFailure? = nil) throws -> ArchivedRecognition {
+        sources: [WikipediaReviewSource]? = nil, answer: WikipediaReviewAnswer? = nil, response: RecognitionModelResponse? = nil, failure: SemanticReviewFailure? = nil,
+        stopReason: RecognitionStopReason? = nil) throws -> ArchivedRecognition {
         try Task.checkCancellation()
         var record = try read(id)
         guard record.status == .succeeded, record.currentAttemptID == attemptID, var review = record.semanticReview,
@@ -555,6 +629,7 @@ public actor RecognitionArchive {
             review.sourcesFinishedAt = Date()
         }
         review.state = state
+        review.stopReason = stopReason
         review.failure = state == .failed ? failure : nil
         if !review.isPending { review.finishedAt = Date() }
         record.semanticReview = review

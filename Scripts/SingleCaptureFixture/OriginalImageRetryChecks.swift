@@ -21,8 +21,8 @@ import UIKit
             permission: { self.permissionRequests += 1; return true },
             previewStart: { _ in self.cameraStarts += 1 }, previewStop: {}, access: { true },
             decodeBarcodes: { _ in [] }, wikipediaLookup: { _ in nil },
-            provider: { jpeg, attemptID, validate in
-                try validate()
+            provider: { jpeg, attemptID, validate, submitted in
+                try validate(); try submitted()
                 self.sent.append(.init(id: attemptID, jpeg: jpeg))
                 do {
                     let result = try await withCheckedThrowingContinuation { self.waiters[attemptID] = $0 }
@@ -88,7 +88,9 @@ import UIKit
             checks["failed_to_success_retains_original_identity_date_and_sequence"] = success?.status == .succeeded && success?.id == original.id && success?.capturedAt == original.capturedAt && success?.sequence == original.sequence
             checks["retry_success_keeps_verified_barcodes_and_source_identity"] = success?.result?.barcodes == ["verified-original-code"] && success?.result?.sourceImageID == original.id
             checks["retry_success_releases_slot_and_clears_frozen_preview"] = !probe.model.busy && probe.model.submittedPreview == nil && probe.model.completionID == original.id
-            checks["successful_card_cannot_retry_or_send_again"] = !probe.model.retryImage(id: original.id) && probe.sent.count == 1
+            // Build62 explicitly permits a new manual refresh on successful cards.
+            // Merely rendering that enabled action must never send another request.
+            checks["successful_card_allows_explicit_refresh_without_automatic_send"] = success.map { probe.model.canRetryImage($0) } == true && probe.sent.count == 1
             let after = try await probe.archive.image(for: original)
             checks["retry_never_reencodes_or_overwrites_source_JPEG"] = after == image
 

@@ -70,7 +70,7 @@ final class C2WriteFault: @unchecked Sendable {
         }
         if ProcessInfo.processInfo.arguments.contains("--onboarding-ui") { configureOnboardingFixture() }
     }
-    func makeModel(consent: DataConsentController = .fixtureAccepted(), account: SIWCController = SIWCController(allowsDataTransfer: { true }), access: @escaping () -> Bool = { true }, permission: @escaping () async -> Bool = { true }, requestTimeout: Duration = .seconds(120), semantic: Semantic45Probe? = nil) -> SingleCaptureController {
+    func makeModel(consent: DataConsentController = .fixtureAccepted(), account: SIWCController = SIWCController(allowsDataTransfer: { true }), access: @escaping () -> Bool = { true }, permission: @escaping () async -> Bool = { true }, requestTimeout: Duration = .seconds(120), semantic: Semantic45Probe? = nil, background: Background62Lease? = nil) -> SingleCaptureController {
         let fault = writeFault
         let reviewProvider: (@MainActor (RecognitionResult, String?, [WikipediaReviewSource], @escaping () throws -> Void) async throws -> String)?
         if let semantic {
@@ -86,14 +86,16 @@ final class C2WriteFault: @unchecked Sendable {
                 return real ? await SourceBarcodeDecoder.shared.scan(jpeg) : .init(values: injected)
             },
             wikipediaLookup: wikipediaLookup, wikipediaReferencesLookup: wikipediaReferencesLookup,
-            provider: { jpeg, _, validate in
+            provider: { jpeg, _, validate, submitted in
                 if self.delayValidation { await withCheckedContinuation { self.holdBeforeSend = $0 } }
-                try validate(); self.calls += 1; self.lastJPEG = jpeg
+                try validate(); try submitted(); self.calls += 1; self.lastJPEG = jpeg
                 return try await withCheckedThrowingContinuation { self.waiter = $0 }
             }, semanticReviewEnabled: semantic != nil,
             semanticSources: { result in try await semantic?.sources(result) ?? [] },
             semanticProvider: reviewProvider,
-            loadAccount: false, requestTimeout: requestTimeout)
+            loadAccount: false, requestTimeout: requestTimeout,
+            backgroundBegin: { handler in background?.begin(handler) ?? UIBackgroundTaskIdentifier(rawValue: 6200) },
+            backgroundEnd: { id in background?.end(id) })
     }
     static func jpeg(_ color: UIColor) -> Data {
         UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).image { context in
@@ -483,8 +485,9 @@ final class C2WriteFault: @unchecked Sendable {
         await complete()
         check["late_background_reply_does_not_restart_or_arm"] = starts == startsWhileBackground && !model.previewOpen && !model.acquiring && model.submittedPreview == nil && !model.capture.analysisGate.enabled
         check["late_background_reply_is_saved"] = model.records.first?.status == .succeeded && model.records.first?.id == pending
-        model.foreground(.active); await settle { model.previewOpen }
-        check["foreground_reopens_preview_only"] = model.previewOpen && !model.acquiring
+        model.foreground(.active); await Task.yield()
+        check["foreground_requires_explicit_preview_reopen"] = !model.previewOpen && !model.acquiring && starts == startsWhileBackground
+        await model.openPreview(explicit: true)
         _ = model.beginAcquisition(); feed(); await settle { waiter != nil }
         let deadline = model.cycle.deadline!; clock.now = deadline; let stopsBeforeExpiry = stops
         model.checkPreviewDeadline()
@@ -543,7 +546,9 @@ final class C2WriteFault: @unchecked Sendable {
     @State private var host = C2FixtureHost()
     var body: some Scene {
         WindowGroup {
-            if ProcessInfo.processInfo.arguments.contains("--semantic45-checks") || ProcessInfo.processInfo.arguments.contains("--semantic45-ui") {
+            if ProcessInfo.processInfo.arguments.contains("--background62-checks") || ProcessInfo.processInfo.arguments.contains("--refresh62-ui") {
+                Background62View()
+            } else if ProcessInfo.processInfo.arguments.contains("--semantic45-checks") || ProcessInfo.processInfo.arguments.contains("--semantic45-ui") {
                 Semantic45View()
                     .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("--dark") ? .dark : .light)
                     .environment(\.dynamicTypeSize, ProcessInfo.processInfo.arguments.contains("--maximum-type") ? .accessibility5 : .large)

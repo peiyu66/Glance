@@ -68,7 +68,9 @@ import UniformTypeIdentifiers
 }
 extension C2FixtureHost {
     func recognize45(_ probe: Semantic45Probe) async -> UUID? {
-        guard model.beginAcquisition() else { return nil }
+        // This helper represents an explicit user press, including reopening a
+        // preview closed by a launch/foreground transition in Build62.
+        guard await model.startRecognition() else { return nil }
         feed(); await settle { waiter != nil }
         waiter?.resume(returning: Semantic45Probe.result); waiter = nil
         await model.waitForCurrentWork()
@@ -103,7 +105,8 @@ extension C2FixtureHost {
                 await host.model.waitForWikipediaWork()
                 await host.settle { host.model.records.first?.semanticReview?.isPending != true }
                 let saved = host.model.records.first
-                if scenario == "success" {
+                if scenario == "success" || scenario == "background" {
+                    if scenario == "background" { c["background62_completes_with_existing_allowance"] = saved?.semanticReview?.state == .succeeded && !host.model.previewOpen }
                     c["same_card_updates_without_changing_original"] = saved?.id == id && saved?.currentAttemptID == id && saved?.result == initial.result && saved?.presentationResult?.summary == Semantic45Probe.answer.summary
                     c["source_role_and_exact_second_raw_saved"] = saved?.currentSemanticReview?.displayTitle == "曙光公司（品牌持有者）" && saved?.semanticJSONDocument?.rawText == probe.lastRaw
                     c["stage_two_share_uses_updated_summary_and_source"] = saved?.shareText().contains(Semantic45Probe.answer.summary) == true && saved?.shareText().contains("品牌持有者") == true
@@ -192,7 +195,9 @@ struct Semantic45View: View {
         } else {
             VStack {
                 HStack {
-                    Button("合成初步結果") { Task { _ = await host.recognize45(probe) } }.accessibilityIdentifier("semantic45-start")
+                    Button("合成初步結果") { Task { _ = await host.recognize45(probe) } }
+                        .disabled(!ready || !host.model.canStartRecognition)
+                        .accessibilityIdentifier("semantic45-start")
                     Button("百科回覆") {
                         if let id = host.model.records.first?.id {
                             probe.finish(id, noMatch: ProcessInfo.processInfo.arguments.contains("--compact55-insufficient"), networkFailure: ProcessInfo.processInfo.arguments.contains("--compact55-failure"))

@@ -2,6 +2,72 @@ import XCTest
 import UIKit
 
 extension CaptureUITests {
+    func testBackground62FinitePipelineRefreshAndRecovery() {
+        let app = launch(["--background62-checks"])
+        let status = app.staticTexts["background62-checks"]
+        XCTAssertTrue(status.waitForExistence(timeout: 10))
+        let done = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH 'passed' OR label BEGINSWITH 'FAILED'"), object: status)
+        XCTAssertEqual(XCTWaiter.wait(for: [done], timeout: 90), .completed)
+        XCTAssertTrue(status.label.hasPrefix("passed"), status.label)
+    }
+    func testRefresh62ActionOrderAndEntirePipelineLock() { checkRefresh62([]) }
+    func testRefresh62ActionOrderAndEntirePipelineLockAtLargeType() { checkRefresh62(["--refresh62-large"]) }
+    private func checkRefresh62(_ options: [String]) {
+        let app = launch(["--refresh62-ui"] + options)
+        let refresh = app.buttons["refreshRecognition-1"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 15))
+        for _ in 0..<3 {
+            if refresh.isHittable { break }
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        let json = app.buttons["modelJSON-1"]
+        let share = app.otherElements["archiveCard-1"].buttons["shareRecognitionResult"]
+        XCTAssertTrue(refresh.isHittable && json.isHittable && share.isHittable)
+        XCTAssertLessThan(json.frame.midX, refresh.frame.midX)
+        XCTAssertLessThan(refresh.frame.midX, share.frame.midX)
+        XCTAssertLessThanOrEqual(json.frame.maxX, refresh.frame.minX)
+        XCTAssertLessThanOrEqual(refresh.frame.maxX, share.frame.minX)
+        let timestamp = app.staticTexts["archiveTimestamp-1"]
+        if !options.isEmpty {
+            XCTAssertGreaterThan(timestamp.frame.width, 150)
+            XCTAssertLessThan(timestamp.frame.maxY, refresh.frame.minY)
+        }
+        XCTAssertEqual(refresh.label, "重新辨識這張圖片")
+        refresh.tap()
+        scrollWait(app.staticTexts["refresh62-count"], "label == '2:1'")
+        XCTAssertFalse(refresh.isEnabled)
+        XCTAssertFalse(app.buttons["continueCapture"].isEnabled)
+        XCTAssertTrue(json.isEnabled && share.isEnabled)
+        app.buttons["refresh62-first"].tap()
+        scrollWait(app.staticTexts["refresh62-count"], "label == '2:2'")
+        XCTAssertFalse(refresh.isEnabled)
+        XCTAssertFalse(app.buttons["continueCapture"].isEnabled)
+        XCTAssertTrue(json.isEnabled && share.isEnabled)
+        app.buttons["refresh62-second"].tap()
+        scrollWait(app.staticTexts["refresh62-busy"], "label == 'idle'")
+        XCTAssertTrue(refresh.isEnabled)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "refresh62-completed-\(options.isEmpty ? "normal" : "large")"; shot.lifetime = .keepAlways; add(shot)
+        refresh.tap(); scrollWait(app.staticTexts["refresh62-count"], "label == '3:2'")
+        app.buttons["refresh62-fail"].tap(); scrollWait(app.staticTexts["refresh62-busy"], "label == 'idle'")
+        XCTAssertTrue(app.staticTexts["refreshNotice-1"].label.contains("保留上次成功結果"))
+        XCTAssertTrue(app.links["wikipedia-1"].exists && json.isEnabled && share.isEnabled && refresh.isEnabled)
+        json.tap()
+        XCTAssertTrue(app.staticTexts["modelJSONMessage"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["modelJSONMessage"].label.contains("上次成功"))
+        app.buttons["modelJSONStage-2"].tap()
+        XCTAssertTrue((app.textViews["modelJSONText"].value as? String ?? "").contains("曙光"))
+        app.buttons["closeModelJSON"].tap()
+    }
+    func testRefresh62MissingImageDisablesActionWithReason() {
+        let app = launch(["--refresh62-ui", "--refresh62-missing"])
+        let refresh = app.buttons["refreshRecognition-1"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 15))
+        XCTAssertFalse(refresh.isEnabled)
+        XCTAssertTrue(app.staticTexts["refreshMissingImage-1"].exists)
+        XCTAssertTrue(app.textViews["archiveText-1"].exists)
+        XCTAssertEqual(app.staticTexts["refresh62-count"].label, "1:1")
+    }
     private func enableJSON45(_ app: XCUIApplication) {
         app.buttons["設定"].tap()
         let toggle = app.switches["showModelJSON"]
@@ -2228,6 +2294,7 @@ extension CaptureUITests {
     func testTitle61TraditionalWikiLabelBeforeAndAfterArchiveReload() {
         let app = launch(["--semantic45-ui", "--title61"])
         XCTAssertTrue(app.buttons["semantic45-start"].waitForExistence(timeout: 10))
+        scrollWait(app.buttons["semantic45-start"], "enabled == true")
         app.buttons["semantic45-start"].tap()
         XCTAssertTrue(app.textViews["archiveText-1"].waitForExistence(timeout: 10))
         app.buttons["semantic45-finish"].tap()

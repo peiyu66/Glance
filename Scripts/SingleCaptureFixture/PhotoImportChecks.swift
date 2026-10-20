@@ -40,12 +40,12 @@ private actor PhotoImportBarcodeProbe {
             permission: { self.permissionRequests += 1; return cameraAllowed },
             previewStart: { _ in self.cameraStarts += 1 }, previewStop: {}, access: { self.access },
             decodeBarcodes: { await barcode.decode($0) }, wikipediaLookup: { _ in nil },
-            provider: { jpeg, id, validate in
+            provider: { jpeg, id, validate, submitted in
                 try validate()
                 let row = try await self.archive.load(recoverPending: false).records.first(where: { $0.id == id })
                 let saved: Data?
                 if let row { saved = try await self.archive.image(for: row) } else { saved = nil }
-                try validate()
+                try validate(); try submitted()
                 self.sent.append(.init(id: id, jpeg: jpeg,
                     durableBeforeSend: row?.status == .pending && row?.source == .photoLibrary && saved == jpeg))
                 return try await withCheckedThrowingContinuation { self.waiters[id] = $0 }
@@ -242,8 +242,8 @@ private actor PhotoImportBarcodeProbe {
             for _ in 0..<400 { if await pending.barcode.waiting { break }; try? await Task.sleep(for: .milliseconds(5)) }
             checks["preflight_race_reaches_barcode_before_transport"] = await pending.barcode.waiting
             pending.model.foreground(.background); pending.model.foreground(.active); await pending.barcode.resume()
-            await pending.settle { !pending.model.busy }
-            checks["background_round_trip_before_transport_keeps_failed_card_without_send"] = pending.sent.isEmpty && pending.model.requestCount == 0 && pending.model.records.first?.status == .failed && pending.model.records.first?.source == .photoLibrary
+            await pending.settle { !pending.waiters.isEmpty }; await pending.reply()
+            checks["background_round_trip_preserves_reserved_photo_pipeline"] = pending.sent.count == 1 && pending.model.requestCount == 1 && pending.model.records.first?.status == .succeeded && pending.model.records.first?.source == .photoLibrary
 
             let invalid = PhotoImportProbe(); probes.append(invalid); await invalid.model.reloadHistory()
             let invalidAccepted = await invalid.select(Data("generated invalid image".utf8))
