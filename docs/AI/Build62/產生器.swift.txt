@@ -1,0 +1,17 @@
+import Foundation
+@main struct Dump {
+    static func main() throws {
+        let entity = SearchEntity(kind: .series, name: "曙光旋脆片", aliases: ["Aurora Swirls"], sourceText: "AURORA SWIRLS")
+        let example: [String: Any] = ["schema_version": 17, "names": ["曙光旋脆片"], "summary": "曙光旋脆片是一款零食系列。", "text": ["AURORA SWIRLS"], "search_entities": try JSONSerialization.jsonObject(with: JSONEncoder().encode([entity]))]
+        let raw = String(decoding: try JSONSerialization.data(withJSONObject: example, options: [.sortedKeys]), as: UTF8.self)
+        let parsed = try CameraAnswer.parse(raw, expectingStructured: true)
+        let excerpt = "Aurora Swirls is a snack series made with potatoes."
+        let source = WikipediaReviewSource(pageID: 4501, title: "曙光旋脆片", url: URL(string: "https://zh.wikipedia.org/wiki/Aurora_Swirls")!, fetchedAt: Date(timeIntervalSince1970: 1792368000), excerpts: [.init(id: "p0", text: excerpt)])
+        let request = try JSONSerialization.jsonObject(with: WikipediaSemanticReview.request(result: parsed, rawStageOne: raw, sources: [source], catalog: [.init(slug: "gpt-6-luna", display_name: "Fixture", visibility: "list")]))
+        let answer = WikipediaReviewAnswer(decision: .selected, sourceID: source.id, relationship: .same_entity, searchName: "曙光旋脆片", summary: "曙光旋脆片是以馬鈴薯製成的零食系列。", citations: [.init(excerptID: "p0", quote: excerpt)])
+        let answerData = try JSONEncoder().encode(answer)
+        _ = try WikipediaSemanticReview.parse(String(decoding: answerData, as: UTF8.self), sources: [source])
+        let data = try JSONSerialization.data(withJSONObject: ["stage1Revision":CameraAnswer.promptRevision,"stage1Prompt":CameraAnswer.prompt,"stage1Format":CameraAnswerSchema.format,"stage2Revision":WikipediaSemanticReview.promptRevision,"stage2Prompt":WikipediaSemanticReview.prompt,"stage2Format":WikipediaSemanticReview.format,"stage1ExampleResult":example,"stage2ExampleRequest":request,"stage2ExampleAnswer":try JSONSerialization.jsonObject(with: answerData)],options:[.prettyPrinted,.sortedKeys,.withoutEscapingSlashes])
+        print(String(decoding:data,as:UTF8.self))
+    }
+}

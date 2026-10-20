@@ -1,10 +1,10 @@
 # Glance 目前 AI 完整指令與 Schema
 
-更新：2026-10-20 UTC。適用 Build 60／61；最新完成本機成品為61、Air已安裝60，最後核實公開版仍為 43。完整版本與驗收界線見[現況與版本](現況與版本.md)。
+更新：2026-10-20 UTC。適用Build60／61／62；最新完成本機候選為62、Air已安裝62，最後核實公開版仍為 43。完整版本與驗收界線見[現況與版本](現況與版本.md)。
 
-以下英文指令與完整 `text.format` 來自產品提交 `8ee9edb299c1563bff03dfdb4e3ebd320ed1ab25` 的 Swift 核心編譯匯出，非手寫近似版本。匯出於 06:13:47 UTC 完成、編譯與執行 exit 0。中文段落是解說，不會額外送入 prompt。[機器可讀原件](AI/Build61/實際契約.json)與[來源雜湊](AI/Build61/來源與雜湊.json)可供逐字核對。
+以下英文指令與完整 `text.format` 來自產品提交 `ebb8d59cdc87fd0be2b263108289f3f4f47f6dae` 的 Swift 核心編譯匯出，非手寫近似版本。匯出於 06:51:11 UTC 完成、編譯與執行 exit 0。中文段落是解說，不會額外送入 prompt。[機器可讀原件](AI/Build62/實際契約.json)與[來源雜湊](AI/Build62/來源與雜湊.json)可供逐字核對。
 
-| 項目 | Build 61 實際值 |
+| 項目 | Build62實際值 |
 | --- | --- |
 | 第一階段 prompt revision | P20-English-concise-entity-zhTW1 |
 | 第一階段回覆 | schema_version 17，glance_camera_v17 |
