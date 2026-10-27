@@ -194,6 +194,18 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
     public var currentAttemptID: UUID { attempts?.last?.id ?? id }
     public var attemptNumber: Int { attempts?.count ?? 1 }
     public var canRetryImage: Bool { status != .pending }
+    /// Based only on saved identity/terminal evidence. This never starts a request.
+    public var canContinueSemanticReview: Bool {
+        guard status == .succeeded, let result, result.searchContractVersion == 17,
+              !WikipediaReviewCollector.queries(for: result).isEmpty else { return false }
+        guard let review = currentSemanticReview else { return true }
+        switch review.state {
+        case .succeeded: return review.source == nil
+        case .noMatch: return review.answer?.decision != .no_match || review.answer?.valid(sources: review.sources) != true
+        case .insufficientEvidence: return false
+        case .collecting, .reviewing, .failed, .cancelled, .interrupted: return true
+        }
+    }
     public var barcodes: [String] { decodedBarcodes ?? result?.barcodes ?? [] }
     public var googleSearch: GoogleSearchQuery? {
         if status != .succeeded, retainedSuccess != nil { return displayRecord.googleSearch }
@@ -575,13 +587,27 @@ public actor RecognitionArchive {
         try write(encode(record), to: directory(id).appendingPathComponent("record.json"))
         return record
     }
-    /// Claim once before any network request. Restart and repeated UI events never replay it.
+    /// Claim once before any network request. Restart never replays it automatically.
     public func beginSemanticReview(id: UUID, attemptID: UUID, runID: UUID, expectedResult: RecognitionResult) throws -> ArchivedRecognition {
+        try claimSemanticReview(id: id, attemptID: attemptID, runID: runID, expectedResult: expectedResult, resuming: false, previousRunID: nil)
+    }
+    /// One explicit manual continuation; compare-and-swap prevents two retries or stale UI actions.
+    public func resumeSemanticReview(id: UUID, attemptID: UUID, runID: UUID, previousRunID: UUID?, expectedResult: RecognitionResult) throws -> ArchivedRecognition {
+        try claimSemanticReview(id: id, attemptID: attemptID, runID: runID, expectedResult: expectedResult, resuming: true, previousRunID: previousRunID)
+    }
+    private func claimSemanticReview(id: UUID, attemptID: UUID, runID: UUID, expectedResult: RecognitionResult,
+                                     resuming: Bool, previousRunID: UUID?) throws -> ArchivedRecognition {
         try Task.checkCancellation()
         var record = try read(id)
-        guard record.status == .succeeded, record.currentAttemptID == attemptID, record.result == expectedResult,
-              record.semanticReview == nil else { throw Failure.invalidCompletion }
+        guard record.status == .succeeded, record.currentAttemptID == attemptID, record.result == expectedResult else { throw Failure.invalidCompletion }
+        if resuming {
+            guard record.canContinueSemanticReview, record.semanticReview?.runID == previousRunID,
+                  runID != previousRunID else { throw Failure.invalidCompletion }
+        } else { guard record.semanticReview == nil else { throw Failure.invalidCompletion } }
+        let previousGeneration = record.semanticReview?.generation ?? 0
+        guard previousGeneration < Int.max else { throw Failure.invalidCompletion }
         record.semanticReview = .init(recordID: id, attemptID: attemptID, runID: runID)
+        record.semanticReview?.runNumber = previousGeneration + 1
         record.semanticReview?.requestCaptureVersion = 1
         try write(encode(record), to: directory(id).appendingPathComponent("record.json"))
         return record
@@ -660,7 +686,7 @@ public actor RecognitionArchive {
     /// First remove the whole record from the readable namespace. Completions and
     /// enrichment never create directories, so a late reply cannot resurrect it.
     /// The hidden directory is deletion work, not an undo copy; load retries cleanup.
-    public func delete(ids: Set<UUID>) throws -> Deletion {
+    public func delete(ids: Set<UUID>, resetSequenceWhenEmpty: Bool = false) throws -> Deletion {
         try ensureRoot()
         // Validate the entire request before deleting anything, including pending work.
         for id in ids {
@@ -678,6 +704,19 @@ public actor RecognitionArchive {
             }
         }
         let cleanupIssues = cleanupDeleted()
+        if resetSequenceWhenEmpty && !ids.isEmpty && deleted == ids && issues.isEmpty && cleanupIssues.isEmpty {
+            // Only an explicit successful clear-all resets the display counter.
+            // Verify disk, not a possibly stale UI list; never discard unknown records.
+            do {
+                if try manager.contentsOfDirectory(atPath: root.path).isEmpty {
+                    nextSequence = 1
+                } else {
+                    issues.append("仍有未清除的紀錄或檔案，編號尚未重設；請重新讀取紀錄。")
+                }
+            } catch {
+                issues.append("無法確認清空結果，編號尚未重設；請重新讀取紀錄。")
+            }
+        }
         return Deletion(deletedIDs: deleted, issues: issues + cleanupIssues, cleanupPending: !cleanupIssues.isEmpty)
     }
     /// Only generated deletion directories inside this archive are eligible.

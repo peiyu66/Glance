@@ -265,6 +265,9 @@ struct SingleCaptureView: View {
                                         image: { await model.image(for: record) },
                                         onOpen: { enlargedImage = $0 }, shareProbe: shareProbe, showsModelJSON: showsModelJSON,
                                         retryEnabled: model.canRetryImage(record), onRetry: { _ = model.retryImage(id: record.id) },
+                                        recognitionAction: model.cardRecognitionAction(for: record),
+                                        continueEnabled: model.canContinueSecondStage(record),
+                                        onContinue: { _ = model.continueSecondStage(id: record.id) },
                                         refreshNotice: record.retainedResultNotice, missingImageReason: model.missingImageReason(record))
                                         .id(record.id)
                                         .listRowInsets(EdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12))
@@ -725,6 +728,9 @@ struct ArchivedRecognitionRow: View {
     var showsModelJSON = false
     var retryEnabled = false
     var onRetry: (() -> Void)? = nil
+    var recognitionAction: SingleCaptureController.CardRecognitionAction = .fullImage
+    var continueEnabled = false
+    var onContinue: (() -> Void)? = nil
     var refreshNotice: String? = nil
     var missingImageReason: String? = nil
     @State private var jpeg: Data?
@@ -784,16 +790,11 @@ struct ArchivedRecognitionRow: View {
                     .accessibilityIdentifier("modelJSON-\(record.sequence)")
                 }
                 if let onRetry {
-                    Button(action: onRetry) {
-                        Image(systemName: "arrow.clockwise")
-                            .modifier(RecognitionCardActionLabel(appearance: actionAppearance,
-                                enabled: retryEnabled && jpeg != nil))
-                    }
-                        .buttonStyle(RecognitionCardActionButtonStyle())
-                        .disabled(!retryEnabled || jpeg == nil)
-                        .accessibilityLabel("重新辨識這張圖片")
-                        .accessibilityHint(missingImageReason ?? "使用這筆紀錄的原圖，從第一階段重新辨識。")
-                        .accessibilityIdentifier("refreshRecognition-\(record.sequence)")
+                    RecognitionRetryActionButton(state: recognitionAction,
+                        appearance: actionAppearance, sequence: record.sequence,
+                        retryEnabled: retryEnabled && jpeg != nil,
+                        continueEnabled: continueEnabled, missingImageReason: missingImageReason,
+                        onRetry: onRetry, onContinue: { onContinue?() })
                 }
                 RecognitionShareButton(text: record.shareText(), imageAvailable: jpeg != nil, probe: shareProbe, snapshot: {
                         guard let current = currentRecord(), current.id == record.id, current.firstStageActionsEnabled else { return nil }
@@ -1270,5 +1271,60 @@ final class RecognitionTextView: UITextView {
             representations[UTType.rtf.identifier] = rtf
         }
         UIPasteboard.general.items = [representations]
+    }
+}
+
+/// One fixed action position; only an explicit menu selection starts a new image attempt.
+struct RecognitionRetryActionButton: View {
+    let state: SingleCaptureController.CardRecognitionAction
+    let appearance: RecognitionCardActionAppearance
+    let sequence: Int
+    let retryEnabled: Bool
+    let continueEnabled: Bool
+    let missingImageReason: String?
+    let onRetry: () -> Void
+    let onContinue: () -> Void
+    private var enabled: Bool {
+        switch state { case .working: false; case .continueSecondStage: continueEnabled; case .fullImage: retryEnabled }
+    }
+    private var label: String {
+        switch state { case .working: "辨識處理中"; case .continueSecondStage: "繼續第二階段"; case .fullImage: "重新辨識這張圖片" }
+    }
+    private var hint: String {
+        switch state {
+        case .working: "請等候這次辨識完成，無法重複送出。"
+        case .continueSecondStage: "第二階段尚未完成，點此繼續；長按可選擇重新辨識整張。"
+        case .fullImage: missingImageReason ?? "使用這筆紀錄的原圖，從第一階段重新辨識。"
+        }
+    }
+    var body: some View {
+        Button {
+            if state == .continueSecondStage { onContinue() }
+            else if state == .fullImage { onRetry() }
+        } label: {
+            Group {
+                if state == .working { ProgressView().tint(.secondary) }
+                else if state == .continueSecondStage {
+                    Image(systemName: "arrow.clockwise")
+                        .overlay(alignment: .topTrailing) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: appearance.pointSize * 0.65, weight: .bold))
+                                .symbolRenderingMode(.palette).foregroundStyle(.white, .blue)
+                                .offset(x: 7, y: -5)
+                        }
+                } else { Image(systemName: "arrow.clockwise") }
+            }.modifier(RecognitionCardActionLabel(appearance: appearance, enabled: enabled))
+        }
+        .buttonStyle(RecognitionCardActionButtonStyle())
+        .disabled(!enabled)
+        .accessibilityLabel(label).accessibilityHint(hint).help(hint)
+        .accessibilityIdentifier("refreshRecognition-\(sequence)")
+        .contextMenu {
+            if state != .working {
+                Button("重新辨識整張", systemImage: "arrow.clockwise") { onRetry() }
+                    .disabled(!retryEnabled)
+                    .accessibilityIdentifier("recognizeWholeImage-\(sequence)")
+            }
+        }
     }
 }

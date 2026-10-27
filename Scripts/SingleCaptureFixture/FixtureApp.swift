@@ -556,6 +556,12 @@ final class C2WriteFault: @unchecked Sendable {
         WindowGroup {
             if ProcessInfo.processInfo.arguments.contains("--background62-checks") || ProcessInfo.processInfo.arguments.contains("--refresh62-ui") {
                 Background62View()
+            } else if ProcessInfo.processInfo.arguments.contains("--resume71-ui") {
+                Resume71UIView()
+                    .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("--dark") ? .dark : .light)
+                    .environment(\.dynamicTypeSize, ProcessInfo.processInfo.arguments.contains("--maximum-type") ? .accessibility5 : .large)
+            } else if ProcessInfo.processInfo.arguments.contains("--resume71-checks") {
+                Resume71ChecksView()
             } else if ProcessInfo.processInfo.arguments.contains("--semantic45-checks") || ProcessInfo.processInfo.arguments.contains("--semantic45-ui") {
                 Semantic45View()
                     .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("--dark") ? .dark : .light)

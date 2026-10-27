@@ -117,7 +117,7 @@ private func card69(first: String = chinese69, second: String? = reported69) -> 
             #expect(reopened.presentationResult?.summary == "这段中文包含まろやかな泡。")
         }
     }
-    @Test func assembledRequestsKeepP22W5ChineseRequirement() throws {
+    @Test func assembledRequestsKeepP22W6ChineseRequirement() throws {
         let catalog = [SIWCModel(slug: "gpt-6-luna", display_name: "Fixture", visibility: "list")]
         let camera = try JSONSerialization.jsonObject(with: CameraAnswer.request(model: "gpt-6-luna", catalog: catalog, jpeg: Data([6,9]))) as! [String:Any]
         let first = ((camera["input"] as! [[String:Any]])[0]["content"] as! [[String:Any]])[0]["text"] as! String
@@ -126,7 +126,7 @@ private func card69(first: String = chinese69, second: String? = reported69) -> 
         let second = ((wiki["input"] as! [[String:Any]])[0]["content"] as! [[String:Any]])[0]["text"] as! String
         for prompt in [first, second] { #expect(prompt.contains("Summary prose must always be Taiwan Traditional Chinese")) }
         #expect(CameraAnswer.promptRevision == "P22-English-summary-language-zhTW1")
-        #expect(WikipediaSemanticReview.promptRevision == "W5-English-summary-language-zhTW1")
+        #expect(WikipediaSemanticReview.promptRevision == "W6-Chinese-source-and-search-name")
     }
     @Test func storedW4RequestCompatibilityAndFiveSourcesRemain() throws {
         let card = card69(), input = try WikipediaSemanticReview.input(result: card.result!, rawStageOne: nil, sources: card.semanticReview!.sources)

@@ -53,7 +53,12 @@ extension C2FixtureHost {
         checks["clear_removes_all_image_and_record_directories"] = (try? FileManager.default.contentsOfDirectory(atPath: host.root.path).isEmpty) == true
         let afterClear = host.makeModel(); await afterClear.bootstrap()
         checks["reopen_after_all_remains_empty"] = afterClear.records.isEmpty
-        afterClear.closePreview(); host.model.closePreview()
+        afterClear.closePreview()
+        await host.model.openPreview(explicit: true)
+        let nextID = await recognize()
+        checks["clear_next_record_immediately_sequence_one_same_controller"] = nextID != nil && host.model.records.first?.sequence == 1
+        checks["clear_next_record_has_distinct_uuid"] = nextID != old && nextID != pending
+        host.model.closePreview()
 
         let wiki = C5WikipediaProbe()
         let enrichment = C2FixtureHost(name: "build34-deletion-wiki-" + UUID().uuidString, wikipediaLookup: { await wiki.lookup($0) })

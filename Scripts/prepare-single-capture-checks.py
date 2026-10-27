@@ -9,6 +9,7 @@ source=(root/'App/CameraView.swift').read_text()
 inputs=sorted((root/'Sources/GlanceCore').glob('*.swift'))+[root/'App/CameraCapture.swift',root/'App/ForegroundORB.swift',root/'App/SIWCView.swift',root/'App/SIWCStorageNetwork.swift',root/'App/SIWCLoopback.swift',root/'App/SourceBarcodeDecoder.swift',root/'App/SingleCaptureController.swift',root/'App/SelectedPhoto.swift',root/'App/SingleCaptureView.swift',root/'Scripts/SingleCaptureFixture/FixtureApp.swift',root/'Scripts/SingleCaptureFixture/WikipediaChecks.swift',root/'Scripts/SingleCaptureFixture/ProductFactsChecks.swift',root/'Scripts/SingleCaptureFixture/VisibleCropChecks.swift',root/'Scripts/SingleCaptureFixture/OriginalImageRetryChecks.swift',root/'Scripts/SingleCaptureFixture/PhotoImportChecks.swift',root/'Scripts/SingleCaptureFixture/BarcodeEvidenceChecks.swift',root/'Scripts/SingleCaptureFixture/FocusSelectionChecks.swift',root/'Scripts/SingleCaptureFixture/ScrollCollapseChecks.swift',root/'Scripts/SingleCaptureFixture/RichShareChecks.swift',root/'Scripts/CaptureLimitFixture/OpticalLinkStub.swift',root/'Scripts/SingleCaptureFixture/CaptureUITests.swift']
 inputs.append(root/'Scripts/SingleCaptureFixture/AuthRecoveryChecks.swift')
 inputs.append(root/'Scripts/SingleCaptureFixture/Semantic45Checks.swift')
+inputs.append(root/'Scripts/SingleCaptureFixture/Resume71Checks.swift')
 inputs.append(root/'Scripts/SingleCaptureFixture/Background62Checks.swift')
 inputs.append(root/'Scripts/SingleCaptureFixture/TextWikipediaChecks.swift')
 inputs.append(root/'App/DataConsentController.swift')

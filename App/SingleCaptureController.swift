@@ -74,6 +74,7 @@ import SwiftUI
     private let semanticProvider: (@MainActor (RecognitionResult, String?, [WikipediaReviewSource], @escaping () throws -> Void) async throws -> String)?
     private struct SemanticJob { let attemptID: UUID; let runID: UUID; let task: Task<Void, Never> }
     private var semanticJobs: [UUID: SemanticJob] = [:]
+    private var semanticCancellationIDs: Set<UUID> = []
     @ObservationIgnored private var semanticCardSnapshots: [UUID: ArchivedRecognition] = [:]
     private var semanticAccountIdentity = ""
     private(set) var semanticRequestCount = 0
@@ -279,7 +280,7 @@ import SwiftUI
             wikipediaTasks.removeValue(forKey: id)?.cancel()
         }
         do {
-            let deletion = try await archive.delete(ids: ids)
+            let deletion = try await archive.delete(ids: ids, resetSequenceWhenEmpty: clearingAll)
             onRecordsWillChange?()
             records.removeAll { deletion.deletedIDs.contains($0.id) }
             for id in deletion.deletedIDs { semanticCardSnapshots[id] = nil }
@@ -701,7 +702,31 @@ import SwiftUI
     func canRetryImage(_ record: ArchivedRecognition) -> Bool {
         historyReady && storageError == nil && unsaved == nil && !deletingHistory && !busy && !acquiring && appActive &&
             !showingSettings && selectedPhoto == nil && !photoSelectionActive && !photoLoading &&
-            canRecognize && !account.busy && record.canRetryImage && !missingImageIDs.contains(record.id)
+            canRecognize && !account.busy && !semanticCancellationIDs.contains(record.id) && semanticJobs[record.id] == nil && record.canRetryImage && !missingImageIDs.contains(record.id)
+    }
+    enum CardRecognitionAction { case fullImage, continueSecondStage, working }
+    func cardRecognitionAction(for record: ArchivedRecognition) -> CardRecognitionAction {
+        if cycle.activeID == record.id || semanticJobs[record.id] != nil || semanticCancellationIDs.contains(record.id) { return .working }
+        return usesSemanticReview && record.canContinueSemanticReview ? .continueSecondStage : .fullImage
+    }
+    func canContinueSecondStage(_ record: ArchivedRecognition) -> Bool {
+        usesSemanticReview && historyReady && storageError == nil && unsaved == nil && !deletingHistory && !busy && !acquiring &&
+            appActive && !showingSettings && selectedPhoto == nil && !photoSelectionActive && !photoLoading &&
+            canRecognize && !account.busy && !semanticCancellationIDs.contains(record.id) && semanticJobs[record.id] == nil && record.canContinueSemanticReview
+    }
+    @discardableResult func continueSecondStage(id: UUID) -> Bool {
+        guard let record = records.first(where: { $0.id == id }), canContinueSecondStage(record) else { return false }
+        let attempt = record.currentAttemptID
+        // Reserve synchronously before launching work; no new image or stage-one attempt.
+        manualRefresh = .init(recordID: id, attemptID: attempt)
+        pipelineOwners[id] = attempt
+        semanticCardSnapshots[id] = record
+        capture.setAnalysisEnabled(false)
+        scheduleSemanticReview(for: id, resuming: true)
+        guard semanticJobs[id] != nil else {
+            semanticCardSnapshots[id] = nil; finishPipeline(id: id, attemptID: attempt); return false
+        }
+        return true
     }
     func missingImageReason(_ record: ArchivedRecognition) -> String? {
         missingImageIDs.contains(record.id) ? "這筆紀錄的原圖無法讀取，不能重新辨識；既有文字仍保留。" : nil
@@ -865,33 +890,41 @@ import SwiftUI
     private func cancelSemanticReview(id: UUID, reason: RecognitionStopReason = .previewClosed) {
         guard let job = semanticJobs.removeValue(forKey: id) else { return }
         job.task.cancel()
-        if var current = records.first(where: { $0.id == id }), current.semanticReview == nil || (current.semanticReview?.runID == job.runID && current.semanticReview?.isPending == true) {
-            if current.semanticReview == nil { current.semanticReview = .init(recordID: id, attemptID: job.attemptID, runID: job.runID) }
+        semanticCancellationIDs.insert(id)
+        semanticCardSnapshots[id] = nil
+        if var current = records.first(where: { $0.id == id }), current.semanticReview?.runID == job.runID && current.semanticReview?.isPending == true {
             current.semanticReview?.state = .cancelled; current.semanticReview?.finishedAt = Date()
             current.semanticReview?.stopReason = reason; replace(current)
         }
         // Separate task records cancellation even though the worker is cancelled.
         Task { [weak self, archive] in
-            defer { self?.finishPipeline(id: id, attemptID: job.attemptID) }
+            defer {
+                self?.semanticCancellationIDs.remove(id)
+                // A newer manual continuation can own the same stage-one attempt.
+                if self?.semanticJobs[id] == nil || self?.semanticJobs[id]?.runID == job.runID {
+                    self?.finishPipeline(id: id, attemptID: job.attemptID)
+                }
+            }
             guard let saved = try? await archive.updateSemanticReview(id: id, attemptID: job.attemptID, runID: job.runID, state: .cancelled, stopReason: reason) else { return }
             self?.replace(saved)
         }
     }
-    private func scheduleSemanticReview(for id: UUID) {
+    private func scheduleSemanticReview(for id: UUID, resuming: Bool = false) {
         guard consent.allowsTransfer, !showingSettings, unsaved == nil,
               semanticJobs[id] == nil, let record = records.first(where: { $0.id == id }),
-              record.status == .succeeded, record.semanticReview == nil, let result = record.result,
+              record.status == .succeeded, (resuming ? record.canContinueSemanticReview : record.semanticReview == nil), let result = record.result,
               pipelineMayRun(id: id, attemptID: record.currentAttemptID),
               !WikipediaReviewCollector.queries(for: result).isEmpty else { return }
         let attempt = record.currentAttemptID, runID = UUID(), consentEpoch = consent.epoch
         let accountIdentity = account.recognitionAccountIdentity
-        // At most two optional jobs; no queue, retry, old-history replay or implicit resubmit.
+        // At most two jobs. Continuation requires a manual action; no queue or implicit replay.
         let capacityAvailable = semanticJobs.count < 2
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
                 if semanticJobs[id]?.runID == runID {
                     semanticJobs[id] = nil
+                    semanticCardSnapshots[id] = nil
                     finishPipeline(id: id, attemptID: attempt)
                 }
             }
@@ -904,6 +937,7 @@ import SwiftUI
                       current.status == .succeeded, current.result == result,
                       semanticJobs[id]?.runID == runID else { throw CancellationError() }
             }
+            var claimed = false
             var response: RecognitionModelResponse?
             var requestEvidence: RecognitionModelRequest?
             var failureStage: SemanticReviewFailure.Stage = .admission
@@ -915,7 +949,10 @@ import SwiftUI
             defer { timeout.cancel() }
             do {
                 try validate()
-                let begun = try await archive.beginSemanticReview(id: id, attemptID: attempt, runID: runID, expectedResult: result)
+                let begun = try await (resuming
+                    ? archive.resumeSemanticReview(id: id, attemptID: attempt, runID: runID, previousRunID: record.semanticReview?.runID, expectedResult: result)
+                    : archive.beginSemanticReview(id: id, attemptID: attempt, runID: runID, expectedResult: result))
+                claimed = true
                 try validate(); replace(begun)
                 guard capacityAvailable else { throw SemanticReviewFailure(stage: .admission, code: .capacity) }
                 failureStage = .collecting
@@ -988,6 +1025,12 @@ import SwiftUI
                 // A cancellation task owns durable cancellation; late callbacks never publish.
                 if cancelled {
                     if !Task.isCancelled, let saved = try? await archive.updateSemanticReview(id: id, attemptID: attempt, runID: runID, state: .cancelled) { replace(saved) }
+                    return
+                }
+                // A failed claim has no durable run. Do not invent a run ID in memory:
+                // the next explicit continuation must still compare against the saved run.
+                guard claimed else {
+                    status = "第二階段尚未開始，請稍後再試。"
                     return
                 }
                 let failure = SemanticReviewFailure.capture(error, stage: failureStage)
@@ -1105,7 +1148,8 @@ import SwiftUI
             // Independent archive writes may resume on the main actor out of order.
             // Enrichment never clears another source or rolls a terminal AI result back.
             if record.currentAttemptID == current.currentAttemptID {
-                if let old = current.semanticReview, let next = record.semanticReview, old.runID == next.runID, !old.isPending && next.isPending {
+                if let old = current.semanticReview, let next = record.semanticReview,
+                   (old.runID != next.runID && next.generation <= old.generation) || (old.runID == next.runID && !old.isPending && next.isPending) {
                     merged.semanticReview = old
                 } else { merged.semanticReview = record.semanticReview ?? current.semanticReview }
             }

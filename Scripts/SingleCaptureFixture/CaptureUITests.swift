@@ -2699,3 +2699,94 @@ extension CaptureUITests {
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "semantic45-two-stage-json"; shot.lifetime = .keepAlways; add(shot)
     }
 }
+
+
+extension CaptureUITests {
+    func testResume71ControllerLifecycleAndContinuation() {
+        let app = launch(["--resume71-checks"])
+        let status = app.staticTexts["resume71-checks"]
+        XCTAssertTrue(status.waitForExistence(timeout: 15))
+        let done = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != 'running'"), object: status)
+        XCTAssertEqual(XCTWaiter.wait(for: [done], timeout: 90), .completed)
+        XCTAssertTrue(status.label.hasPrefix("passed "), status.label)
+    }
+}
+
+
+extension CaptureUITests {
+    func testResume71SingleActionProgressFailureAndSuccess() { checkResume71UI([]) }
+    func testResume71SingleActionAtMaximumType() { checkResume71UI(["--maximum-type", "--dark"]) }
+    private func checkResume71UI(_ options: [String]) {
+        let app = launch(["--resume71-ui"] + options)
+        let action = app.buttons["refreshRecognition-1"]
+        XCTAssertTrue(action.waitForExistence(timeout: 20))
+        scrollWait(action, "enabled == true")
+        XCTAssertEqual(action.label, "繼續第二階段")
+        if !options.isEmpty {
+            // Real history scrolling collapses the preview, making the large card actions visible.
+            for _ in 0..<3 where !action.isHittable { historyList(in: app).swipeUp() }
+        }
+        XCTAssertTrue(action.isHittable)
+        XCTAssertTrue(app.frame.contains(action.frame), "Action must be visible in the captured viewport")
+        let frame = action.frame
+        let stopped = XCTAttachment(screenshot: app.screenshot()); stopped.name = "resume71-stopped-\(options.isEmpty ? "normal" : "large")"; stopped.lifetime = .keepAlways; add(stopped)
+        action.tap()
+        scrollWait(action, "enabled == false")
+        XCTAssertEqual(action.label, "辨識處理中")
+        XCTAssertEqual(action.frame.size, frame.size)
+        let pending = XCTAttachment(screenshot: app.screenshot()); pending.name = "resume71-progress"; pending.lifetime = .keepAlways; add(pending)
+        scrollWait(app.staticTexts["resume71-counts"], "label == 'stage1=1 stage2=1'")
+        app.buttons["resume71-fail"].tap()
+        scrollWait(action, "enabled == true")
+        XCTAssertEqual(action.label, "繼續第二階段")
+        action.tap()
+        scrollWait(app.staticTexts["resume71-counts"], "label == 'stage1=1 stage2=2'")
+        app.buttons["resume71-finish"].tap()
+        scrollWait(action, "enabled == true")
+        XCTAssertEqual(action.label, "重新辨識這張圖片")
+        XCTAssertTrue(app.links["wikipedia-1"].waitForExistence(timeout: 5))
+        let done = XCTAttachment(screenshot: app.screenshot()); done.name = "resume71-completed"; done.lifetime = .keepAlways; add(done)
+    }
+    func testResume71ContextMenuDismissAndWholeImageSelection() {
+        let app = launch(["--resume71-ui"])
+        let action = app.buttons["refreshRecognition-1"]
+        XCTAssertTrue(action.waitForExistence(timeout: 20)); scrollWait(action, "enabled == true")
+        action.press(forDuration: 1)
+        let whole = app.buttons["重新辨識整張"]
+        XCTAssertTrue(whole.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["resume71-counts"].label, "stage1=1 stage2=0")
+        let menu = XCTAttachment(screenshot: app.screenshot()); menu.name = "resume71-context-menu"; menu.lifetime = .keepAlways; add(menu)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
+        XCTAssertFalse(whole.exists)
+        XCTAssertEqual(app.staticTexts["resume71-counts"].label, "stage1=1 stage2=0")
+        XCTAssertEqual(action.label, "繼續第二階段")
+        action.press(forDuration: 1); XCTAssertTrue(whole.waitForExistence(timeout: 5)); whole.tap()
+        scrollWait(app.staticTexts["resume71-counts"], "label == 'stage1=2 stage2=0'")
+        XCTAssertFalse(action.isEnabled)
+        XCTAssertEqual(action.label, "辨識處理中")
+        app.buttons["resume71-finish"].tap()
+        scrollWait(app.staticTexts["resume71-counts"], "label == 'stage1=2 stage2=1'")
+        app.buttons["resume71-finish"].tap(); scrollWait(action, "enabled == true")
+        XCTAssertEqual(action.label, "重新辨識這張圖片")
+    }
+}
+
+
+extension CaptureUITests {
+    func testResume71SettingsSheetStopsAndReturnsContinuation() {
+        let app = launch(["--resume71-ui"])
+        let action = app.buttons["refreshRecognition-1"]
+        XCTAssertTrue(action.waitForExistence(timeout: 20)); scrollWait(action, "enabled == true")
+        action.tap(); scrollWait(app.staticTexts["resume71-counts"], "label == 'stage1=1 stage2=1'")
+        app.buttons["設定"].tap()
+        XCTAssertTrue(app.buttons["完成"].waitForExistence(timeout: 5)); app.buttons["完成"].tap()
+        scrollWait(action, "enabled == true")
+        XCTAssertEqual(action.label, "繼續第二階段")
+        app.buttons["resume71-finish"].tap() // Deliver cancelled old request; it must not replace the stopped card.
+        XCTAssertEqual(action.label, "繼續第二階段")
+        XCTAssertEqual(app.staticTexts["resume71-counts"].label, "stage1=1 stage2=1")
+        action.tap(); scrollWait(app.staticTexts["resume71-counts"], "label == 'stage1=1 stage2=2'")
+        app.buttons["resume71-finish"].tap(); scrollWait(action, "enabled == true")
+        XCTAssertEqual(action.label, "重新辨識這張圖片")
+    }
+}

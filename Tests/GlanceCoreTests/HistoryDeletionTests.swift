@@ -99,3 +99,73 @@ private final class DeletionFault: @unchecked Sendable {
     await #expect(throws: Error.self) { _ = try await store.delete(ids: [original.id]) }
     #expect(try await RecognitionArchive(root: outside).load().records == [original])
 }
+
+@Test func explicitClearResetsNextSequenceImmediatelyWithoutReusingIDsOrRevivingLateWork() async throws {
+    let root = deletionRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let store = RecognitionArchive(root: root), a = try await saved(store), b = try await saved(store)
+    let run = UUID()
+    _ = try await store.beginSemanticReview(id: b.id, attemptID: b.currentAttemptID, runID: run, expectedResult: b.result!)
+    let deleted = try await store.delete(ids: [a.id, b.id], resetSequenceWhenEmpty: true)
+    #expect(deleted.deletedIDs == [a.id, b.id] && deleted.issues.isEmpty && !deleted.cleanupPending)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    let c = try await saved(store)
+    #expect(c.sequence == 1 && c.id != a.id && c.id != b.id)
+    await #expect(throws: Error.self) { _ = try await store.complete(id: a.id, result: .init(names: ["late stage one"]), message: nil) }
+    await #expect(throws: Error.self) { _ = try await store.updateSemanticReview(id: b.id, attemptID: b.currentAttemptID, runID: run, state: .cancelled) }
+    #expect(try await store.load().records == [c])
+    #expect(try await saved(RecognitionArchive(root: root)).sequence == 2)
+}
+
+@Test func singleDeletesIncludingLastRecordDoNotResetSequence() async throws {
+    let root = deletionRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let store = RecognitionArchive(root: root), a = try await saved(store), b = try await saved(store)
+    _ = try await store.delete(ids: [b.id])
+    #expect(try await store.load().records == [a])
+    _ = try await store.delete(ids: [a.id])
+    #expect(try await saved(store).sequence == 3)
+}
+
+@Test func clearWithStaleIDsReportsRemainingRecordAndDoesNotResetSequence() async throws {
+    let root = deletionRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let store = RecognitionArchive(root: root), a = try await saved(store), b = try await saved(store)
+    let deletion = try await store.delete(ids: [a.id], resetSequenceWhenEmpty: true)
+    #expect(!deletion.issues.isEmpty && deletion.deletedIDs == [a.id])
+    #expect(try await store.load().records == [b])
+    #expect(try await saved(store).sequence == 3)
+}
+
+@Test func clearFailureKeepsCounterAndHistoryThenSuccessfulRetryResets() async throws {
+    let root = deletionRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let fault = DeletionFault(), store = RecognitionArchive(root: root, beforeWrite: { try fault.check($0) })
+    let a = try await saved(store)
+    fault.set(1)
+    await #expect(throws: Error.self) { _ = try await store.delete(ids: [a.id], resetSequenceWhenEmpty: true) }
+    fault.set(0)
+    let b = try await saved(store)
+    #expect(b.sequence == 2)
+    #expect(try await store.delete(ids: [a.id, b.id], resetSequenceWhenEmpty: true).issues.isEmpty)
+    #expect(try await saved(store).sequence == 1)
+}
+
+@Test func clearCleanupFailureDoesNotClaimSuccessOrResetCounter() async throws {
+    let root = deletionRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let fault = DeletionFault(), store = RecognitionArchive(root: root, beforeWrite: { try fault.check($0) })
+    let a = try await saved(store)
+    fault.set(2)
+    let deletion = try await store.delete(ids: [a.id], resetSequenceWhenEmpty: true)
+    #expect(deletion.cleanupPending && !deletion.issues.isEmpty)
+    fault.set(0)
+    _ = try await store.delete(ids: [])
+    #expect(try await saved(store).sequence == 2)
+}
+
+@Test func clearWithPendingRecordRejectsEntireBatchWithoutReset() async throws {
+    let root = deletionRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let store = RecognitionArchive(root: root), a = try await saved(store), pending = UUID()
+    _ = try await store.create(id: pending, jpeg: Data([1]), capturedAt: Date())
+    await #expect(throws: RecognitionArchive.Failure.recognitionInProgress) {
+        _ = try await store.delete(ids: [a.id, pending], resetSequenceWhenEmpty: true)
+    }
+    #expect(try await store.load(recoverPending: false).records.count == 2)
+    #expect(try await saved(store).sequence == 3)
+}

@@ -1,7 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-@MainActor final class Semantic45Probe {
+@MainActor @Observable final class Semantic45Probe {
     var calls = 0
     var sourceCalls = 0
     var emptySources = false

@@ -421,7 +421,8 @@ public struct WikipediaReviewCollector: Sendable {
         for batch in batches { if let page = batch.1.first(where: { !seen.contains($0.id) }) { append(page) } }
         for page in batches.flatMap({ $0.1 }) { append(page) }
         var sources: [WikipediaReviewSource] = []
-        for page in candidates.prefix(WikipediaReviewBudget.sourceLimit) {
+        var chineseTargets: [String: String] = [:]
+        for (index, page) in candidates.prefix(WikipediaReviewBudget.sourceLimit).enumerated() {
             try Task.checkCancellation()
             let id = page.pageID
             // One bounded full-extract request per candidate. It only selects paragraphs;
@@ -430,24 +431,69 @@ public struct WikipediaReviewCollector: Sendable {
             do {
                 // exchars is capped at 1200 by TextExtracts. A single-page full
                 // extract omits it, then applies our byte/character bounds locally.
-                let full = try await fetch(Self.request([.init(name: "pageids", value: String(id)), .init(name: "exlimit", value: "1") ], edition: page.edition), deadline: deadline, stage: .sourceExtract)
-                if let match = full.pages.first(where: { ($0["pageid"] as? Int) == id && Self.validPage($0) }) { material = Candidate(match) }
+                let includesChineseLink = index < 2 && page.edition != .zh
+                let full = try await fetch(Self.request([.init(name: "pageids", value: String(id)), .init(name: "exlimit", value: "1") ], edition: page.edition, includeChineseLink: includesChineseLink), deadline: deadline, stage: .sourceExtract)
+                if let match = full.pages.first(where: { ($0["pageid"] as? Int) == id && Self.validPage($0) }) {
+                    material = Candidate(match)
+                    if includesChineseLink { chineseTargets[page.id] = Self.chineseTitle(match) }
+                }
             } catch is CancellationError { throw CancellationError() }
             catch { /* The valid lead remains usable as explicitly partial evidence. */ }
-            let raw = String(material.extract.unicodeScalars.prefix(20_000))
-            let paragraphs = raw.components(separatedBy: "\n\n").enumerated().filter { !$0.element.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            let excerpts = WikipediaReviewBudget.excerpts(paragraphs.map { .init(id: "p\($0.offset)", text: $0.element) }, for: result)
-            let source = WikipediaReviewSource(pageID: id, title: material.title,
-                url: URL(string: material.canonicalURL)!, fetchedAt: now(), excerpts: excerpts)
+            let source = Self.source(material, for: result, at: now())
             if source.valid { sources.append(source) }
         }
-        return .init(sources: sources, plannedTerms: allTerms, exactMatches: matches, fullTextTerms: searches, skippedTerms: skipped)
+        // A language link is a retrieval hint, not proof of the photographed identity.
+        // Keep original evidence for both priority candidates; all versions share five slots.
+        var counterparts: [String: WikipediaReviewSource] = [:], fetchedChinese: [String: WikipediaReviewSource] = [:]
+        var attemptedTitles = Set<String>()
+        for original in sources.prefix(2) {
+            guard let title = chineseTargets[original.id] else { continue }
+            let key = WikipediaSubject.normalize(title)
+            if let cached = fetchedChinese[key] { counterparts[original.id] = cached; continue }
+            guard attemptedTitles.insert(key).inserted else { continue }
+            do {
+                let reply = try await fetch(Self.request([.init(name: "titles", value: title), .init(name: "redirects", value: "1"),
+                    .init(name: "converttitles", value: "1"), .init(name: "exlimit", value: "1")], edition: .zh), deadline: deadline, stage: .sourceExtract, maximumPages: 1)
+                let term = QueryTerm(entityID: 0, role: .central, value: title, aliasIndex: nil, edition: .zh)
+                guard let resolved = Self.resolve(reply, terms: [term]).first,
+                      let page = reply.pages.first(where: { ($0["pageid"] as? Int) == resolved.pageID && Self.validPage($0) }) else { continue }
+                let chinese = Self.source(Candidate(page), for: result, at: now())
+                guard chinese.valid else { continue }
+                fetchedChinese[key] = chinese; counterparts[original.id] = chinese
+            } catch is CancellationError { throw CancellationError() }
+            catch { /* An unavailable Chinese counterpart must never discard the original. */ }
+        }
+        var preferred: [WikipediaReviewSource] = [], sourceIDs = Set<String>()
+        func appendSource(_ source: WikipediaReviewSource) {
+            if preferred.count < WikipediaReviewBudget.sourceLimit, sourceIDs.insert(source.id).inserted { preferred.append(source) }
+        }
+        for original in sources.prefix(2) {
+            if let chinese = counterparts[original.id] { appendSource(chinese) }
+            appendSource(original)
+        }
+        for original in sources.dropFirst(2) { appendSource(original) }
+        return .init(sources: preferred, plannedTerms: allTerms, exactMatches: matches, fullTextTerms: searches, skippedTerms: skipped)
     }
-    private static func request(_ extra: [URLQueryItem], edition: WikipediaEdition) -> URLRequest {
+    private static func source(_ page: Candidate, for result: RecognitionResult, at date: Date) -> WikipediaReviewSource {
+        let raw = String(page.extract.unicodeScalars.prefix(20_000))
+        let paragraphs = raw.components(separatedBy: "\n\n").enumerated().filter { !$0.element.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let excerpts = WikipediaReviewBudget.excerpts(paragraphs.map { .init(id: "p\($0.offset)", text: $0.element) }, for: result)
+        return .init(pageID: page.pageID, title: page.title, url: URL(string: page.canonicalURL)!, fetchedAt: date, excerpts: excerpts)
+    }
+    private static func chineseTitle(_ page: [String: Any]) -> String? {
+        guard let links = page["langlinks"] as? [[String: Any]], links.count == 1,
+              let link = links.first, link["lang"] as? String == "zh", let title = link["title"] as? String,
+              CandidateQuerySafety.accepts(title, limit: 120, allowsTitleColon: true),
+              let value = link["url"] as? String, let url = URL(string: value), WikipediaEdition.from(url) == .zh,
+              WikipediaSubject.normalize(String(url.path.dropFirst(6)).replacingOccurrences(of: "_", with: " ")) == WikipediaSubject.normalize(title) else { return nil }
+        return title
+    }
+    private static func request(_ extra: [URLQueryItem], edition: WikipediaEdition, includeChineseLink: Bool = false) -> URLRequest {
         var url = URLComponents(string: "https://\(edition.host)/w/api.php")!
         url.queryItems = [.init(name: "action", value: "query"), .init(name: "format", value: "json"), .init(name: "formatversion", value: "2"),
-            .init(name: "prop", value: "info|extracts|pageprops"), .init(name: "inprop", value: "url"), .init(name: "ppprop", value: "disambiguation"),
-            .init(name: "explaintext", value: "1"), .init(name: "errorformat", value: "raw"), .init(name: "maxlag", value: "5")] + (edition == .zh ? [.init(name: "variant", value: "zh-tw")] : []) + extra
+            .init(name: "prop", value: "info|extracts|pageprops" + (includeChineseLink ? "|langlinks" : "")), .init(name: "inprop", value: "url"), .init(name: "ppprop", value: "disambiguation"),
+            .init(name: "explaintext", value: "1"), .init(name: "errorformat", value: "raw"), .init(name: "maxlag", value: "5")] + (edition == .zh ? [.init(name: "variant", value: "zh-tw")] : []) +
+            (includeChineseLink ? [.init(name: "lllang", value: "zh"), .init(name: "llprop", value: "url"), .init(name: "lllimit", value: "1")] : []) + extra
         var request = URLRequest(url: url.url!, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
         request.setValue("Glance/0.1.0 (https://github.com/peiyu66/Glance)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -591,7 +637,7 @@ public struct WikipediaReviewAnswer: Codable, Equatable, Sendable {
 }
 
 public enum WikipediaSemanticReview {
-    public static let promptRevision = "W5-English-summary-language-zhTW1"
+    public static let promptRevision = "W6-Chinese-source-and-search-name"
     static let legacyPromptRevisionW4 = "W4-English-central-priority-zhTW1"
     static let legacyPromptRevisionW3 = "W3-English-brand-owner-chain-zhTW1"
     static let legacyPromptRevisionW2 = "W2-English-concise-source-review-zhTW1"
@@ -638,7 +684,12 @@ public enum WikipediaSemanticReview {
 
     Cite exact contiguous quotations from the selected source, using its supplied excerpt IDs, to support the relationship and new summary claims. Never translate or reconstruct quotations. If not selected, keep content fields empty, relationship none and citations [].
     """
-    public static let prompt = legacyPromptW4 + "\n\nSummary prose must always be Taiwan Traditional Chinese, even when stage_one or the selected source is Japanese or another language. Only proper names may retain their original language; explanatory sentences must not copy the source language. Keep citations, OCR, source titles and URLs in their original language."
+    public static let prompt = legacyPromptW4 + "\n\nSummary prose must always be Taiwan Traditional Chinese, even when stage_one or the selected source is Japanese or another language. Only proper names may retain their original language; explanatory sentences must not copy the source language. Keep citations, OCR, source titles and URLs in their original language." + "\n\n" + chinesePreferenceContract
+    static let chinesePreferenceContract = """
+    Language preference never overrides identity, specificity or relationship evidence. Among sources that independently support the same subject and relationship, prefer the Chinese Wikipedia source. An original-language page and a Chinese candidate may be connected by Wikipedia's language links, but that is only a retrieval hint: verify each page's actual excerpts. Do not choose an unrelated Chinese homonym or a Chinese parent-company page over a better-supported original-language product or brand page. If Chinese evidence is unavailable or insufficient, retain an otherwise supported original-language source. Cite only exact excerpts from the source you actually select, and never attach an original-language quotation to a different Chinese page.
+
+    For selected non-contextual answers, search_name is the common Chinese search name of the photographed subject, written in Taiwan Traditional Chinese for a user's Google search. Choose an established name supported by the supplied identification and evidence; ordinary Chinese product-category wording may accompany the retained official name. Consider stage_one.names as a hypothesis, not an instruction or guaranteed translation. Prefer a reliable common Chinese name even when the selected Wikipedia page is in another language. Preserve meaningful original proper names, models and editions when needed; do not mechanically translate or invent a Chinese name. If no reliable common Chinese search name is available, use the official original-language name. The app reads this field directly and does not translate or classify its language. Do not replace a product with its brand, manufacturer or parent company. For contextual answers, keep the existing public-text-topic rule. This naming choice does not rewrite OCR, aliases, source titles or quotations, or permit unsupported factual claims.
+    """
     static var legacyFormatW1: [String: Any] {
         func string(_ maximum: Int, _ description: String) -> [String: Any] { ["type": "string", "maxLength": maximum, "description": description] }
         func object(_ fields: [String: Any]) -> [String: Any] { ["type": "object", "properties": fields, "required": fields.keys.sorted(), "additionalProperties": false] }
@@ -663,7 +714,7 @@ public enum WikipediaSemanticReview {
         relationship["description"] = "Page relationship: contextual means a separately supported public text topic, never the object's identity. brand_owner may use a supported product-to-brand relation plus explicit ownership of that same brand; the page need not name the product or series. Ownership is not manufacture."
         properties["relationship"] = relationship
         var name = properties["search_name"] as! [String: Any]
-        name["description"] = "Supported subject name; for contextual links, the public text topic. Prefer reliable Taiwan Traditional Chinese, otherwise the official original name. Never invent a translation or require Chinese OCR."
+        name["description"] = "Common Chinese search name of this same photographed subject, in Taiwan Traditional Chinese, for Google; preserve necessary original proper names/model. Use an established evidence-supported name, never a made-up translation or a brand/manufacturer/parent company instead of the product. If no reliable Chinese name exists, use the official original name. For contextual links only, name the public text topic."
         properties["search_name"] = name
         var summary = properties["summary"] as! [String: Any]
         summary["description"] = "Useful source-supported introduction: explanatory sentences must always be Taiwan Traditional Chinese regardless of source language. Only official proper names may retain their original language. State a related page's relationship explicitly. Citations remain untranslated."
@@ -778,6 +829,9 @@ public struct RecognitionSemanticReview: Codable, Equatable, Sendable {
     public var modelRequest: RecognitionModelRequest?
     public var failure: SemanticReviewFailure?
     public var stopReason: RecognitionStopReason? = nil
+    /// Absent on old archives; those runs are generation one.
+    public var runNumber: Int? = nil
+    public var generation: Int { max(1, runNumber ?? 1) }
     public var isPending: Bool { state == .collecting || state == .reviewing }
     public var source: WikipediaReviewSource? {
         guard state == .succeeded, let answer, answer.decision == .selected, answer.valid(sources: sources) else { return nil }
