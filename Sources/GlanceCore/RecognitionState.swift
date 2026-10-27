@@ -1,5 +1,47 @@
 import Foundation
 
+/// Explicit web addresses only. Never infer a scheme or rewrite saved recognition text.
+public enum RecognitionWebURL {
+    public struct Match: Equatable, Sendable {
+        public let range: NSRange
+        public let url: URL
+    }
+
+    public static func parse(_ raw: String) -> URL? {
+        guard raw.range(of: #"(?i)^https?://"#, options: .regularExpression) != nil,
+              raw.rangeOfCharacter(from: CharacterSet(charactersIn: "\\<>\"{}|^`")) == nil,
+              raw.range(of: #"%(?![0-9A-Fa-f]{2})"#, options: .regularExpression) == nil,
+              !raw.unicodeScalars.contains(where: {
+                  CharacterSet.whitespacesAndNewlines.contains($0) ||
+                  CharacterSet.controlCharacters.contains($0) ||
+                  CharacterSet(charactersIn: "\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}").contains($0)
+              }),
+              let url = URL(string: raw, encodingInvalidCharacters: true),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              let host = components.host, !host.isEmpty, host != ".",
+              components.user == nil, components.password == nil,
+              components.port.map({ (0...65535).contains($0) }) ?? true else { return nil }
+        return url
+    }
+
+    public static func matches(in text: String) -> [Match] {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        let source = text as NSString
+        return detector.matches(in: text, range: NSRange(location: 0, length: source.length)).compactMap { match in
+            let raw = source.substring(with: match.range)
+            // Reject detector-inferred schemes, emails and addresses nested in other schemes.
+            guard let url = parse(raw) else { return nil }
+            if match.range.location > 0 {
+                let previous = source.substring(with: NSRange(location: match.range.location - 1, length: 1))
+                if previous.rangeOfCharacter(from: .alphanumerics) != nil ||
+                    ":/@%._-+\\".contains(previous) { return nil }
+            }
+            return .init(range: match.range, url: url)
+        }
+    }
+}
+
 public struct RecognitionResult: Codable, Equatable, Hashable, Sendable {
     public var usesEntitySearch: Bool { [14, 15, 16, 17].contains(searchContractVersion ?? -1) }
     public let names: [String]

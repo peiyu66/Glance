@@ -80,7 +80,7 @@ import Testing
 }
 
 @Test func publicDrugPromptSeparatesManualSearchFromPrivateRecordsAndWiki() throws {
-    #expect(CameraAnswer.promptRevision == "P20-English-concise-entity-zhTW1")
+    #expect(CameraAnswer.promptRevision == "P22-English-summary-language-zhTW1")
     for reason in ["sensitive", "conflict", "uncertain"] {
         let raw = try JSONSerialization.data(withJSONObject: ["names": ["Actein 顆粒"], "summary": "", "text": [], "barcodes": [],
             "search": ["query": "Actein 顆粒", "category": "product"], "search_block_reason": reason, "wikipedia": NSNull()])

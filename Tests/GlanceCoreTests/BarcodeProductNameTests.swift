@@ -78,7 +78,7 @@ private let reportedOCR = ["synmosa", "腹釋寧消化", "腸溶糖衣錠", "PHA
         let answer = try CameraAnswer.parse(String(decoding: JSONSerialization.data(withJSONObject: response), as: UTF8.self))
         let card = fixtureCard(answer)
         let url = try #require(card.googleSearch?.googleURL)
-        #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: name), .init(name: "gl", value: "tw"), .init(name: "lr", value: "lang_zh-TW")])
+        #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: name), .init(name: "gl", value: "tw")])
         #expect(card.shareDocument().links.first?.url == url)
         #expect(card.shareText().contains("Google 搜尋：" + name))
         #expect(!url.absoluteString.contains("0800"))

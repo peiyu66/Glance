@@ -41,6 +41,10 @@ extension C2FixtureHost {
         signedIn(account); host.model.accountStateChanged()
         c["successful_login_finishes_setup"] = memory.value.setupCompleted && host.model.canRecognize && !host.model.showingOnboarding
         await host.model.openPreview()
+        c["login_after_background_does_not_reopen_camera"] = !host.model.previewOpen && !host.model.acquiring && host.calls == 0
+        // Build 62 keeps the camera closed after leaving the foreground. Model
+        // an explicit preview action before checking that preview alone sends nothing.
+        await host.model.openPreview(explicit: true)
         c["login_does_not_start_recognition"] = host.model.previewOpen && !host.model.acquiring && host.calls == 0
         account.signOut(); await host.settle { !account.busy }; host.model.accountStateChanged()
         c["signout_keeps_consent_closes_recognition"] = consent.allowsTransfer && !host.model.canRecognize && !memory.value.setupCompleted
@@ -52,7 +56,9 @@ extension C2FixtureHost {
         c["existing_login_requires_new_consent"] = upgrading.showingOnboarding && !upgrading.canRecognize
         upgrading.acceptDataUse()
         c["existing_login_does_not_reauthenticate"] = logins == 3 && upgrading.canRecognize && upgrade.value.setupCompleted
-        await host.model.openPreview(); _ = host.model.beginAcquisition(); host.feed()
+        let began = await host.model.startRecognition()
+        c["withdraw_fixture_has_explicit_capture"] = began
+        host.feed()
         await host.settle { host.waiter != nil }
         let id = host.model.records.first?.id
         host.model.withdrawDataUse()

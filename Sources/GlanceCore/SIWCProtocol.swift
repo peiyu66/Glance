@@ -7,6 +7,57 @@ public enum SIWCError: Error, Equatable {
     case sseInvalidUTF8, sseInvalidJSON, sseMissingType, sseSizeLimit, unexpectedContentType
 }
 
+/// Product requirements are guidance, never an inference about the failing account's tier.
+public enum SIWCSignInMessage {
+    public static let requirement = "Glance 需使用具備方案使用權限的 ChatGPT 付費帳戶，免費帳戶無法使用辨識功能。"
+    public static func failure(stage: SIWCAuthStage, category: SIWCAuthCategory?, httpStatus: Int? = nil, errorCode: String? = nil) -> String {
+        let detail: String
+        switch category {
+        case .userCancelled: return "登入已取消；沒有更換帳戶。"
+        case .timeout, .callbackExpired: return "登入嘗試已逾時；請由你重新開始登入。"
+        case .transport: detail = "登入連線未完成；請檢查網路連線。"
+        case .browser: detail = "官方登入視窗未完成返回；請確認登入視窗狀態。"
+        case .storage: return "無法讀寫 Glance 的本機安全會話；原資料已保留，請解鎖裝置後再試。"
+        case .identity: detail = "登入回應未通過身分或安全驗證；未更換帳戶。"
+        case .planDisabled: detail = "這次登入未取得方案使用權限。"
+        case .callbackConsumed, .repeatedReturn: return "這次登入回呼已處理；沒有再次交換憑證。"
+        case .callbackRejected, .callbackShape, .callbackState, .callbackClient, .callbackMissingCode:
+            detail = "登入回呼未通過安全檢查；未更換帳戶。"
+        case .oauthDenied, .oauthError:
+            detail = "官方授權未完成；請確認登入帳戶與授權狀態。"
+        case .http:
+            let code = SIWCAuthDiagnostic.safeCode(errorCode)
+            let parts = [httpStatus.flatMap { (100...599).contains($0) ? "HTTP \($0)" : nil }, code].compactMap { $0 }
+            let suffix = parts.isEmpty ? "" : "（" + parts.joined(separator: "，") + "）"
+            if let httpStatus, httpStatus >= 500 {
+                detail = "官方登入服務暫時無法完成請求\(suffix)。"
+            } else if stage == .tokenExchange {
+                detail = "登入憑證交換未完成\(suffix)。"
+            } else { detail = "官方登入請求未完成\(suffix)。" }
+        default: detail = "登入回應未能完成驗證；未更換帳戶。"
+        }
+        let credentialStage = [.tokenExchange, .tokenDecode, .identity, .permission].contains(stage)
+        guard credentialStage || category == .planDisabled else { return detail }
+        return detail + "請確認目前登入的帳戶。使用要求：" + requirement
+    }
+}
+
+/// Remove only known research artifacts, never the archive or Keychain.
+public enum SIWCLegacyDiagnosticCleanup {
+    public static let filenames = ["siwc-auth-diagnostic.json", "siwc-status.json", "siwc-auth-fixture.json",
+        "siwc-D2-token-404-normal.png", "siwc-D2-workspace-denied-maximum.png"]
+    @discardableResult public static func removeKnownFiles(in documents: URL, fileManager: FileManager = .default) -> Int {
+        var removed = 0
+        for name in filenames {
+            let file = documents.appendingPathComponent(name)
+            guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+            do { try fileManager.removeItem(at: file); removed += 1 } catch { /* Retry cleanup on a later normal load. */ }
+        }
+        return removed
+    }
+}
+
 public enum SIWCProtocol {
     public static let callbackRevision = "C1"
     public static let issuer = "https://auth.openai.com"

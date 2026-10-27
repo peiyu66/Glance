@@ -30,7 +30,7 @@ private func card(_ result: RecognitionResult? = linkedResult(), wiki: Wikipedia
     let url = try #require(document.links.first?.url)
     #expect(document.plainText.contains(document.links[0].markdown))
     #expect(url.scheme == "https" && url.fragment == nil)
-    #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: query.query), .init(name: "gl", value: "tw"), .init(name: "lr", value: "lang_zh-TW")])
+    #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: query.query), .init(name: "gl", value: "tw")])
 }
 
 @Test func archivedShareOmitsMissingLinksAndSupportsLegacyAndBarcodeOnlyCards() throws {

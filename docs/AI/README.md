@@ -1,15 +1,9 @@
 # AI 指令與契約
 
-當前版本以[完整指令與 schema](../目前AI完整指令與Schema.md)為唯一可讀總表；本輪從 Build62 Swift 核心直接匯出，沒有沿用 Build 45 的過時全文。
+目前 Build70 使用 P22／W5、第一階段 schema 17、第二階段 schema 2、input_version 3，與 Build69 契約相同。
 
-| 階段 | 指令 | 回覆 schema | 輸入 |
-| --- | --- | --- | --- |
-| 圖片辨識 | P20-English-concise-entity-zhTW1 | glance_camera_v17 | 指令＋可用 QR 文字＋JPEG |
-| 百科語意核對 | W4-English-central-priority-zhTW1 | glance_wikipedia_review_v2 | input_version 2，僅文字 |
+- [完整可讀指令、schema 與合成輸入](../目前AI完整指令與Schema.md)
+- [已編譯匯出的完整 JSON](Build69/實際契約.json)
+- [匯出來源雜湊](Build69/來源與雜湊.json)及[產生器](Build69/產生器.swift.txt)
 
-- [機器可讀的實際契約與合成範例](Build62/實際契約.json)
-- [匯出程式文字](Build62/產生器.swift.txt)
-- [來源與內容雜湊](Build62/來源與雜湊.json)
-- [候選蒐集與兩階段設計](../使用與設計/百科候選與兩階段.md)
-
-合成範例使用虛構的「曙光旋脆片／Aurora Swirls」與頁面，未呼叫模型或核實該網址存在。它證明資料形狀及本機解析相容，不是答案品質或 Wikipedia 原文證據。
+其餘按版本保存的契約是歷史技術原件，不代表現在執行的流程或歷史安裝狀態。合成範例不含真實私人圖片，也不能作為真模型品質證據。

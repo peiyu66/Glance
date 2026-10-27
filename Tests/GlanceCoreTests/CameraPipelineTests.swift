@@ -345,7 +345,7 @@ private func fingerprint(_ variant: Int = 0) -> SceneFingerprint {
     #expect(body["stream"] as? Bool == true)
     #expect((body["reasoning"] as? [String: String])?["effort"] == "none")
     #expect(input.count == 1 && input.first?["role"] as? String == "user")
-    #expect(CameraAnswer.promptRevision == "P20-English-concise-entity-zhTW1")
+    #expect(CameraAnswer.promptRevision == "P22-English-summary-language-zhTW1")
     #expect(prompt == CameraAnswer.prompt)
     #expect(content.last?["detail"] == nil)
     #expect(content.count == 2)

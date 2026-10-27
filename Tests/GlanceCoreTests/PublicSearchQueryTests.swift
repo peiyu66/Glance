@@ -8,7 +8,7 @@ import Testing
         let url = try #require(search.googleURL)
         let parts = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
         #expect(parts.scheme == "https" && parts.host == "www.google.com" && parts.path == "/search")
-        #expect(parts.queryItems == [URLQueryItem(name: "q", value: raw), URLQueryItem(name: "gl", value: "tw"), URLQueryItem(name: "lr", value: "lang_zh-TW")])
+        #expect(parts.queryItems == [URLQueryItem(name: "q", value: raw), URLQueryItem(name: "gl", value: "tw")])
         #expect(parts.fragment == nil && parts.user == nil)
         #expect(!url.absoluteString.contains("+"))
     }
@@ -82,7 +82,7 @@ import Testing
         #expect(search.query.components(separatedBy: raw).count == 2)
         #expect(GoogleSearchQuery(base: base, productBarcodes: [barcode, barcode]) == search)
         let url = try #require(search.googleURL)
-        #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: search.query), .init(name: "gl", value: "tw"), .init(name: "lr", value: "lang_zh-TW")])
+        #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: search.query), .init(name: "gl", value: "tw")])
         #expect(!url.absoluteString.contains("+") && url.fragment == nil)
         #expect(base.query == "Maker’s Mark C++ & 200 ml")
     }
@@ -133,7 +133,7 @@ import Testing
     #expect(card.shareText().components(separatedBy: "Google 搜尋：").count == 2)
 }
 
-@Test func traditionalResultsKeepOriginalQueryLanguageAndShareOneURL() throws {
+@Test func googleWithoutLanguageFilterKeepsOriginalQueryLanguageAndShareOneURL() throws {
     let code = try #require(ProductBarcode(value: "0085246139462", symbology: .ean13))
     for raw in ["台湾 茶", "臺灣 茶", "English tea", "日本語 茶"] {
         let base = try #require(PublicSearchQuery(query: raw, category: "product"))
@@ -141,7 +141,7 @@ import Testing
             let search = try #require(GoogleSearchQuery(base: base, productBarcodes: barcodes))
             let url = try #require(search.googleURL)
             let parts = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
-            #expect(parts.queryItems == [.init(name: "q", value: raw + (barcodes.isEmpty ? "" : " " + code.value)), .init(name: "gl", value: "tw"), .init(name: "lr", value: "lang_zh-TW")])
+            #expect(parts.queryItems == [.init(name: "q", value: raw + (barcodes.isEmpty ? "" : " " + code.value)), .init(name: "gl", value: "tw")])
             #expect(!url.absoluteString.contains("site:"))
             var record = ArchivedRecognition(schemaVersion: 1, id: UUID(), sequence: 1, capturedAt: Date(), imageSHA256: "fixture", imageByteCount: 1, status: .succeeded, result: .init(names: ["合成"], searchQuery: base), message: nil, completedAt: Date())
             record.productBarcodes = barcodes
@@ -149,10 +149,10 @@ import Testing
         }
     }
     let onlyCode = try #require(GoogleSearchQuery(base: nil, productBarcodes: [code]))
-    #expect(URLComponents(url: onlyCode.googleURL!, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: code.value), .init(name: "gl", value: "tw"), .init(name: "lr", value: "lang_zh-TW")])
+    #expect(URLComponents(url: onlyCode.googleURL!, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: code.value), .init(name: "gl", value: "tw")])
 }
 
-@Test func legacyQueryRegeneratesTraditionalFilterAfterArchiveReopen() async throws {
+@Test func legacyQueryRegeneratesURLWithoutLanguageFilterAfterArchiveReopen() async throws {
     // Old records save only query/category, never a stale URL or language setting.
     let query = try JSONDecoder().decode(PublicSearchQuery.self,
         from: Data(#"{"query":"日本語 茶","category":"product"}"#.utf8))
@@ -165,7 +165,7 @@ import Testing
     let card = try #require(reopened.records.first)
     let url = try #require(card.googleSearch?.googleURL)
     let items = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
-    #expect(items.first(where: { $0.name == "q" })?.value == "日本語 茶")
-    #expect(items.first(where: { $0.name == "lr" })?.value == "lang_zh-TW")
+    #expect(items == [.init(name: "q", value: "日本語 茶"), .init(name: "gl", value: "tw")])
+    #expect(card.result?.searchQuery == query)
     #expect(card.shareDocument().links.first?.url == url)
 }

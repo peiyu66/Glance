@@ -30,7 +30,7 @@ private func topicPage(_ title: String = "晴禾", extract: String = "晴禾是�
         #expect(!items.contains { ($0.value ?? "").contains("原文") || ($0.value ?? "").contains("原味") })
         #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
     }
-    #expect(CameraAnswer.promptRevision == "P20-English-concise-entity-zhTW1")
+    #expect(CameraAnswer.promptRevision == "P22-English-summary-language-zhTW1")
 }
 @Test func wikiTopicsParseInSameAnswerAndMalformedHintsKeepGoogleAndText() throws {
     let hints = try JSONSerialization.jsonObject(with: JSONEncoder().encode(topicResult().wikipediaTopics!))

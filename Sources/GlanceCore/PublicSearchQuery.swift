@@ -186,7 +186,7 @@ private enum ProductSearchFallback {
 private func googleSearchURL(_ query: String) -> URL? {
     var components = URLComponents()
     components.scheme = "https"; components.host = "www.google.com"; components.path = "/search"
-    components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "gl", value: "tw"), URLQueryItem(name: "lr", value: "lang_zh-TW")]
+    components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "gl", value: "tw")]
     // Preserve literal plus signs in Google's form query.
     components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
     return components.url

@@ -107,7 +107,7 @@ private actor Transport45 {
         searchEntities: [.init(kind: .brand, name: "曙光", aliases: ["Aurora"], sourceText: "AURORA")])
     let sources = try await WikipediaReviewCollector(transport: { try await transport.fetch($0) }).collect(for: r)
     let count = await transport.requests.count
-    #expect(sources.count == 1 && count == 4) // exact miss + two bounded searches + extract
+    #expect(sources.count == 1 && count == 3) // all aliases exact + one complete-name search + extract
 }
 @Test func semantic45CollectorStopsOnRedirectAndCancellation() async {
     let collector = WikipediaReviewCollector(transport: { request in .init(data: Data(), status: 200, url: URL(string: "https://evil.example")) })
@@ -176,12 +176,12 @@ private actor Transport45 {
     #expect(parsed.searchEntities?.first?.aliases == ["Aurora Swirls"])
 }
 
-@Test func semantic55InputV2KeepsRequiredShapeAndOmitsDuplicateRaw() throws {
+@Test func semantic67InputV3KeepsRequiredShapeAndOmitsDuplicateRaw() throws {
     for raw in [nil, "  {\"text\":[\"原語\"]}  ", String(repeating: "x", count: 32769)] as [String?] {
         let data = try WikipediaSemanticReview.input(result: result45(), rawStageOne: raw, sources: [source45()])
         let payload = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         #expect(Set(payload.keys) == ["input_version", "stage_one", "raw_stage_one_json", "sources"])
-        #expect(payload["input_version"] as? Int == 2)
+        #expect(payload["input_version"] as? Int == 3)
         #expect(payload["raw_stage_one_json"] is NSNull)
         let body = try JSONSerialization.jsonObject(with: WikipediaSemanticReview.request(result: result45(), rawStageOne: raw, sources: [source45()], catalog: catalog45)) as! [String: Any]
         let input = body["input"] as! [[String: Any]]

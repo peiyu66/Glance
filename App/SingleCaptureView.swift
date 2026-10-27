@@ -401,7 +401,7 @@ struct SingleCaptureView: View {
     private var controls: some View {
         VStack(spacing: 4) {
             RecognitionActionRow {
-                if model.busy {
+                if model.isRecognizingImage {
                     // A waiting status stays legible even though another request is disabled.
                     Button {} label: { RecognitionActionLabel(title: "開始辨識", pending: true, motionAllowed: motionAllowed) }
                         .buttonStyle(RecognitionActionButtonStyle(pending: true))
@@ -468,13 +468,15 @@ private struct SingleCaptureSettingsView: View {
             }
             Section("ChatGPT") {
                 SIWCAccountActions(model: model.account).disabled(model.busy || !allowsTransfer)
+                if !model.account.status.isEmpty {
+                    Text(model.account.status).font(.footnote).textSelection(.enabled).accessibilityIdentifier("siwcStatus")
+                }
                 if model.account.authenticated {
                     Button("登出 ChatGPT") { model.account.signOut() }.disabled(model.busy || model.account.busy)
                         .accessibilityIdentifier("siwc-sign-out")
                 }
                 PlanUsageWarning()
             }
-            SIWCSettingsDiagnostic(model: model.account).disabled(model.busy || !allowsTransfer)
             Section("資料與參考資訊") {
                 Text("本機紀錄").font(.headline).accessibilityAddTraits(.isHeader)
                     .accessibilityIdentifier("settingsLocalHeading")
@@ -493,7 +495,10 @@ private struct SingleCaptureSettingsView: View {
                 Text("辨識後，Glance 會將經檢查的搜尋關鍵字送至維基百科；找到候選頁面時，再將第一階段辨識資料與候選頁面摘錄送至 OpenAI，判斷來源並補充內容。這是額外一次文字 AI 請求，會使用你的帳戶額度。沒有合適的關鍵字或候選頁面，就不進行對應步驟。")
                 Text("Google 搜尋").font(.headline).accessibilityAddTraits(.isHeader)
                     .accessibilityIdentifier("settingsGoogleHeading")
-                Text("Google 搜尋只會在你點選連結後開啟，設定為繁體中文結果並偏向台灣地區；商品搜尋詞可能包含本機可靠辨識的商品條碼。不會自動向 Google 查詢。")
+                Text("Google 搜尋只會在你點選連結後開啟，設定為中文結果並偏向台灣地區；商品搜尋詞可能包含本機可靠辨識的商品條碼。不會自動向 Google 查詢。")
+                Text("背景傳送").font(.headline).accessibilityAddTraits(.isHeader)
+                Text(DataUseExplanation.backgroundTransferText).accessibilityIdentifier("settingsBackgroundExplanation")
+                Link("完整隱私聲明", destination: DataUseExplanation.privacyURL).accessibilityIdentifier("settingsPrivacyLink")
             }
             Section("App 資訊") {
                 LabeledContent("版本", value: GlanceBuildVersion.display())
@@ -735,8 +740,9 @@ struct ArchivedRecognitionRow: View {
     @State private var jsonSnapshot: JSONSnapshot?
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    private var actionWidth: CGFloat { dynamicTypeSize.isAccessibilitySize ? 64 : 44 }
-    private var actionHeight: CGFloat { dynamicTypeSize.isAccessibilitySize ? 64 : 36 }
+    private var actionAppearance: RecognitionCardActionAppearance {
+        .init(accessibilitySize: dynamicTypeSize.isAccessibilitySize)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             let headerLayout = dynamicTypeSize.isAccessibilitySize
@@ -764,48 +770,52 @@ struct ArchivedRecognitionRow: View {
               }.frame(maxWidth: .infinity, alignment: .leading)
               HStack(spacing: 12) {
                 if showsModelJSON {
-                    Button("JSON") {
+                    Button {
                         guard let current = currentRecord(), current.id == record.id, current.firstStageActionsEnabled else { return }
                         jsonSnapshot = .init(id: current.id, attempt: current.displayRecord.attemptNumber, document: current.modelJSONDocument, secondStage: current.semanticJSONDocument, secondRequest: current.semanticRequestJSONDocument, combinedShareText: current.combinedJSONShareText)
+                    } label: {
+                        Text("JSON")
+                            .modifier(RecognitionCardActionLabel(appearance: actionAppearance,
+                                enabled: record.firstStageActionsEnabled))
                     }
-                    .font(.caption.monospaced().weight(.semibold))
-                    .foregroundStyle(record.firstStageActionsEnabled ? Color.blue : Color.gray)
-                    .buttonStyle(.plain).frame(minWidth: actionWidth, minHeight: actionHeight)
+                    .buttonStyle(RecognitionCardActionButtonStyle())
                     .disabled(!record.firstStageActionsEnabled)
                     .accessibilityLabel("查看第 \(record.sequence) 筆原始 JSON")
                     .accessibilityIdentifier("modelJSON-\(record.sequence)")
                 }
                 if let onRetry {
-                    Button(action: onRetry) { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(retryEnabled && jpeg != nil ? Color.blue : Color.gray)
-                        .frame(width: actionWidth, height: actionHeight)
+                    Button(action: onRetry) {
+                        Image(systemName: "arrow.clockwise")
+                            .modifier(RecognitionCardActionLabel(appearance: actionAppearance,
+                                enabled: retryEnabled && jpeg != nil))
+                    }
+                        .buttonStyle(RecognitionCardActionButtonStyle())
                         .disabled(!retryEnabled || jpeg == nil)
                         .accessibilityLabel("重新辨識這張圖片")
                         .accessibilityHint(missingImageReason ?? "使用這筆紀錄的原圖，從第一階段重新辨識。")
                         .accessibilityIdentifier("refreshRecognition-\(record.sequence)")
                 }
-                if record.firstStageActionsEnabled {
-                    RecognitionShareButton(text: record.shareText(), imageAvailable: jpeg != nil, probe: shareProbe, snapshot: {
+                RecognitionShareButton(text: record.shareText(), imageAvailable: jpeg != nil, probe: shareProbe, snapshot: {
                         guard let current = currentRecord(), current.id == record.id, current.firstStageActionsEnabled else { return nil }
                         let document = current.shareDocument()
                         return .init(text: document.plainText, jpeg: jpeg, document: document)
-                    })
-                        .frame(width: actionWidth, height: actionHeight)
-                        .disabled(record.shareText().isEmpty && jpeg == nil)
-                } else {
-                    Button {} label: { Image(systemName: "square.and.arrow.up") }
-                        .buttonStyle(.plain).foregroundStyle(.gray)
-                        .frame(width: actionWidth, height: actionHeight).disabled(true)
-                        .accessibilityLabel("完成辨識後可分享")
-                        .accessibilityIdentifier("shareRecognitionResult")
-                }
-              }
+                    }, cardActionAppearance: actionAppearance, actionsEnabled: record.firstStageActionsEnabled)
+                    .frame(width: actionAppearance.size.width, height: actionAppearance.size.height)
+                    .disabled(!record.firstStageActionsEnabled || (record.shareText().isEmpty && jpeg == nil))
+              }.fixedSize(horizontal: true, vertical: false)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("archiveActions-\(record.sequence)")
             }
             if !record.barcodes.isEmpty {
-                Text("【條碼】\n\n" + record.barcodes.joined(separator: "\n"))
-                    .font(.body.monospacedDigit()).textSelection(.enabled)
-                    .accessibilityIdentifier("archiveBarcodes-\(record.sequence)")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("【條碼】").font(.body)
+                    ForEach(Array(record.barcodes.enumerated()), id: \.offset) { index, value in
+                        RecognitionBarcodeValue(text: value)
+                            .accessibilityIdentifier("archiveBarcode-\(record.sequence)-\(index)")
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("archiveBarcodes-\(record.sequence)")
             }
             if let result = record.presentationResult {
                 RecognitionSelectableText(result: result, recordID: record.id, sequence: record.sequence,
@@ -852,7 +862,13 @@ struct ArchivedRecognitionRow: View {
                     }
                 }
             }
-            if record.attemptNumber > 1 { Text("第 \(record.attemptNumber) 次嘗試").font(.caption).foregroundStyle(.secondary) }
+            // The visible result may be the previous success while a newer
+            // attempt is pending or failed. Its attempt metadata is independent.
+            if let attemptSummary = (currentRecord() ?? record).retryAttemptSummary() {
+                Text(attemptSummary).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("archiveAttempt-\(record.sequence)")
+            }
             if let message = record.message { Text(message).font(.subheadline).foregroundStyle(.secondary) }
             if let refreshNotice { Text(refreshNotice).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("refreshNotice-\(record.sequence)") }
             if let missingImageReason { Text(missingImageReason).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("refreshMissingImage-\(record.sequence)") }
@@ -957,19 +973,97 @@ private struct RecognitionJSONViewer: View {
 private struct RecognitionJSONText: UIViewRepresentable {
     let text: String
     @ScaledMetric(relativeTo: .body) private var fontSize: CGFloat = 15
+    @Environment(\.openURL) private var openURL
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
         view.isEditable = false; view.isSelectable = true; view.isScrollEnabled = true
         view.dataDetectorTypes = []; view.backgroundColor = .clear
+        view.delegate = context.coordinator
+        view.linkTextAttributes = [.foregroundColor: UIColor.tintColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
         // SwiftUI owns the scale, including per-view accessibility settings.
         view.adjustsFontForContentSizeCategory = false
         view.accessibilityIdentifier = "modelJSONText"
         return view
     }
     func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.value = self
         let font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        if view.font != font { view.font = font }
-        if view.text != text { view.text = text; view.setContentOffset(.zero, animated: false) }
+        let content = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.label])
+        RecognitionWebText.addLinks(to: content)
+        if !view.attributedText.isEqual(to: content) {
+            let changedText = view.text != text
+            view.attributedText = content
+            if changedText { view.setContentOffset(.zero, animated: false) }
+        }
+    }
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var value: RecognitionJSONText
+        init(_ value: RecognitionJSONText) { self.value = value }
+        func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
+            guard case .link(let url) = textItem.content, RecognitionWebURL.parse(url.absoluteString) != nil else { return nil }
+            return UIAction { [weak self] _ in self?.value.openURL(url) }
+        }
+        func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
+            nil // No web preview or implicit external action while reading/selecting JSON.
+        }
+    }
+}
+
+/// A barcode is a whole value: payloads containing prose, numbers or other schemes stay plain.
+struct RecognitionBarcodeValue: View {
+    let text: String
+    @Environment(\.openURL) private var openURL
+    var body: some View {
+        if let url = RecognitionWebURL.parse(text) {
+            Button { openURL(url) } label: {
+                Text(verbatim: text).font(.body.monospacedDigit()).underline()
+                    .foregroundStyle(Color.accentColor)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityRemoveTraits(.isButton)
+            .accessibilityAddTraits(.isLink)
+            .accessibilityLabel(text)
+            .accessibilityHint("在預設瀏覽器開啟網址")
+            .contextMenu {
+                Button("複製網址", systemImage: "doc.on.doc") { UIPasteboard.general.string = text }
+            }
+        } else {
+            Text(verbatim: text).font(.body.monospacedDigit())
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+        }
+    }
+}
+
+/// Link styling changes presentation only; selected/shared text remains byte-for-byte source text.
+struct RecognitionWebText: View {
+    let text: String
+    @Environment(\.openURL) private var openURL
+    var body: some View {
+        Text(Self.content(text))
+            .environment(\.openURL, OpenURLAction { url in
+                guard RecognitionWebURL.parse(url.absoluteString) != nil else { return .discarded }
+                openURL(url)
+                return .handled
+            })
+    }
+    static func content(_ text: String) -> AttributedString {
+        var result = AttributedString(text)
+        for match in RecognitionWebURL.matches(in: text) {
+            guard let sourceRange = Range(match.range, in: text),
+                  let range = Range(sourceRange, in: result) else { continue }
+            result[range].link = match.url
+        }
+        return result
+    }
+    static func addLinks(to text: NSMutableAttributedString) {
+        for match in RecognitionWebURL.matches(in: text.string) {
+            text.addAttributes([.link: match.url, .underlineStyle: NSUnderlineStyle.single.rawValue], range: match.range)
+        }
     }
 }
 
@@ -1023,6 +1117,7 @@ struct RecognitionSelectableText: UIViewRepresentable {
     @Binding var originalExpanded: Bool
     @Environment(\.sizeCategory) private var sizeCategory
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openURL) private var openURL
 
     static let disclosureURL = URL(string: "glance-text-control://original")!
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -1074,14 +1169,19 @@ struct RecognitionSelectableText: UIViewRepresentable {
                 let previous = (output.attribute(.paragraphStyle, at: last.location, effectiveRange: nil) as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
                 previous.paragraphSpacing = gapBefore
                 output.addAttribute(.paragraphStyle, value: previous, range: last)
-                output.append(NSAttributedString(string: "\n", attributes: output.attributes(at: output.length - 1, effectiveRange: nil)))
+                var separator = output.attributes(at: output.length - 1, effectiveRange: nil)
+                separator.removeValue(forKey: .link)
+                separator.removeValue(forKey: .underlineStyle)
+                output.append(NSAttributedString(string: "\n", attributes: separator))
             }
             let paragraph = NSMutableParagraphStyle()
             if disclosure { paragraph.tailIndent = -44 }
             var attributes: [NSAttributedString.Key: Any] = [.font: UIFont.preferredFont(forTextStyle: style, compatibleWith: traits),
                 .foregroundColor: secondary ? UIColor.secondaryLabel : UIColor.label, .paragraphStyle: paragraph]
             if disclosure { attributes[.link] = disclosureURL }
-            output.append(NSAttributedString(string: text, attributes: attributes))
+            let block = NSMutableAttributedString(string: text, attributes: attributes)
+            if !disclosure { RecognitionWebText.addLinks(to: block) }
+            output.append(block)
         }
         append(result.names.joined(separator: "\n"), style: .headline)
         append(result.summary)
@@ -1096,11 +1196,16 @@ struct RecognitionSelectableText: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var value: RecognitionSelectableText
         init(_ value: RecognitionSelectableText) { self.value = value }
-        func textView(_ textView: UITextView, shouldInteractWith URL: URL, in characterRange: NSRange,
-                      interaction: UITextItemInteraction) -> Bool {
-            guard URL == RecognitionSelectableText.disclosureURL else { return false }
-            if interaction == .invokeDefaultAction { value.originalExpanded.toggle() }
-            return false
+        func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
+            guard case .link(let url) = textItem.content else { return nil }
+            if url == RecognitionSelectableText.disclosureURL {
+                return UIAction { [weak self] _ in self?.value.originalExpanded.toggle() }
+            }
+            guard RecognitionWebURL.parse(url.absoluteString) != nil else { return nil }
+            return UIAction { [weak self] _ in self?.value.openURL(url) }
+        }
+        func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
+            nil // Keep selection/copy local; do not request a link preview.
         }
     }
 }

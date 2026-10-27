@@ -31,6 +31,7 @@ private func attach62(_ archive: RecognitionArchive, record: ArchivedRecognition
     let original = try await attach62(archive, record: seed62(archive, id: id))
     let pending = try await archive.beginRetry(id: id, attemptID: attempt)
     #expect(pending.currentAttemptID == attempt && pending.status == .pending)
+    #expect(pending.retainedResultNotice == "重新辨識中，暫時顯示上次辨識結果。")
     #expect(pending.result == nil && pending.semanticReview == nil)
     #expect(pending.presentationResult == original.presentationResult)
     #expect(pending.shareDocument() == original.shareDocument())

@@ -108,13 +108,20 @@ public struct SearchCandidate: Codable, Equatable, Hashable, Sendable {
 
 /// Syntax/data minimization only: no religion, medical, alcohol or name dictionary.
 enum CandidateQuerySafety {
-    static func accepts(_ value: String, limit: Int = 64, minimum: Int = 2) -> Bool {
+    static func accepts(_ value: String, limit: Int = 64, minimum: Int = 2, allowsTitleColon: Bool = false) -> Bool {
         guard (minimum...limit).contains(value.count), value.utf8.count <= limit * 4,
               value == value.trimmingCharacters(in: .whitespacesAndNewlines),
               value.range(of: #"[\p{L}]"#, options: .regularExpression) != nil,
               !ProductNameSafety.containsAddress(value) else { return false }
+        // Only modern semantic names opt into a literal subtitle separator.
+        // Validate the original value; do not rewrite names or relax legacy contracts.
+        if allowsTitleColon && value.contains(":") {
+            guard value.range(of: #":(?!\s+\S)"#, options: .regularExpression) == nil,
+                  value.range(of: #"(?i)\b(?:https?|ftp|file|javascript|data|mailto|tel|sms|intent|about|blob|intitle|insource|incategory|prefix|hastemplate|linksto|deepcat|subpageof|contentmodel|namespace):"#, options: .regularExpression) == nil else { return false }
+        }
+        let punctuation = allowsTitleColon ? #"[\p{C}|*\[\]{}<>\"=@]|://|(?i)\bwww\."# : #"[\p{C}:|*\[\]{}<>\"=@]|://|(?i)\bwww\."#
         let patterns = [
-            #"[\p{C}:|*\[\]{}<>\"=@]|://|(?i)\bwww\."#,
+            punctuation,
             #"(?i)\b(?:sk|sess|gh[pousr]|github_pat)[-_][a-z0-9_-]{8,}|\beyJ[a-z0-9_-]{12,}|\b[A-Z][12]\d{8}\b|\b[A-Z]{1,2}\d{7,9}\b"#,
             #"\+?\d[\d ()-]{7,}\d"#,
             #"(?i)(?:password|passwd|token|secret|ssn|account|密碼|密码|帳號|帐号|證號|证号)\s*[-:=：]\s*\S+"#,

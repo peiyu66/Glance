@@ -108,7 +108,7 @@ public struct RecognitionModelRequest: Codable, Equatable, Sendable {
             sha256: SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined(), delivery: .prepared)
     }
     public var valid: Bool {
-        guard appVersion.count <= 32, appBuild.count <= 32, [WikipediaSemanticReview.promptRevision, WikipediaSemanticReview.legacyPromptRevisionW3, WikipediaSemanticReview.legacyPromptRevisionW2, WikipediaSemanticReview.legacyPromptRevisionW1].contains(promptRevision),
+        guard appVersion.count <= 32, appBuild.count <= 32, [WikipediaSemanticReview.promptRevision, WikipediaSemanticReview.legacyPromptRevisionW4, WikipediaSemanticReview.legacyPromptRevisionW3, WikipediaSemanticReview.legacyPromptRevisionW2, WikipediaSemanticReview.legacyPromptRevisionW1].contains(promptRevision),
               byteCount <= 128_000, rawPayload.utf8.count == byteCount,
               let root = (try? JSONSerialization.jsonObject(with: Data(rawPayload.utf8))) as? [String: Any],
               Set(root.keys) == ["input_version", "stage_one", "raw_stage_one_json", "sources"] else { return false }
@@ -151,7 +151,8 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
     public struct Attempt: Codable, Equatable, Identifiable, Sendable {
         public enum Outcome: String, Codable, Sendable { case pending, succeeded, failed, timedOut, interrupted }
         public let id: UUID
-        public let startedAt: Date
+        /// Missing on older attempts; never inferred from the image or response date.
+        public let startedAt: Date?
         public var outcome: Outcome
         public var completedAt: Date?
         public var stopReason: RecognitionStopReason? = nil
@@ -187,7 +188,7 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
     }
     public var retainedResultNotice: String? {
         guard status != .succeeded, retainedSuccess != nil else { return nil }
-        return status == .pending ? "重新辨識中，暫時顯示上次成功結果。" : "重新辨識未完成，保留上次成功結果；可再次手動重新辨識。"
+        return status == .pending ? "重新辨識中，暫時顯示上次辨識結果。" : "重新辨識未完成，保留上次成功結果；可再次手動重新辨識。"
     }
     public var source: ImageSource { imageSource ?? .camera }
     public var currentAttemptID: UUID { attempts?.last?.id ?? id }
@@ -327,6 +328,16 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
         formatter.timeZone = timeZone
         formatter.dateFormat = "yyyy/MM/dd HH:mm"
         return formatter.string(from: capturedAt)
+    }
+    public func retryAttemptSummary(locale: Locale = .autoupdatingCurrent, timeZone: TimeZone = .autoupdatingCurrent) -> String? {
+        guard attemptNumber > 1 else { return nil }
+        let label = "本圖第 \(attemptNumber) 次辨識"
+        guard let startedAt = attempts?.last?.startedAt else { return label }
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.setLocalizedDateFormatFromTemplate("yyyyMMddjmm")
+        return label + "・" + formatter.string(from: startedAt)
     }
 }
 
@@ -494,7 +505,7 @@ public actor RecognitionArchive {
               record.attempts?.contains(where: { $0.id == attemptID }) != true else { throw Failure.invalidCompletion }
         _ = try image(for: record)
         if record.attempts == nil {
-            record.attempts = [.init(id: id, startedAt: record.capturedAt,
+            record.attempts = [.init(id: id, startedAt: nil,
                 outcome: record.status == .succeeded ? .succeeded : record.status == .interrupted ? .interrupted : .failed, completedAt: record.completedAt)]
         }
         if record.status == .succeeded, let result = record.result {
@@ -607,7 +618,7 @@ public actor RecognitionArchive {
               review.recordID == id, review.attemptID == attemptID, review.runID == runID, review.isPending,
               state != .collecting else { throw Failure.invalidCompletion }
         if let sources {
-            guard sources.count <= 3, sources.allSatisfy(\.valid), Set(sources.map(\.id)).count == sources.count else { throw Failure.invalidCompletion }
+            guard sources.count <= WikipediaReviewBudget.sourceLimit, sources.allSatisfy(\.valid), Set(sources.map(\.id)).count == sources.count else { throw Failure.invalidCompletion }
             review.sources = sources
         }
         if let response {

@@ -35,11 +35,13 @@ extension C2FixtureHost {
             let (h,p,b) = await make("whole-pipeline")
             p.holdSources = true
             _ = h.model.beginAcquisition(); h.feed(); await h.settle { h.waiter != nil }
+            c["first_image_pending_has_processing_presentation"] = h.model.isRecognizingImage && h.model.busy
             let id = h.model.records.first!.id, starts = h.starts
             h.model.foreground(.inactive); h.model.foreground(.background)
             c["one_allowance_for_inactive_then_background"] = b.begins == 1 && !h.model.previewOpen
             await h.finishFirst62(); await h.settle { p.sourceWait != nil }
             c["stage_one_completes_and_collects_in_background"] = h.model.records.first?.status == .succeeded && p.sourceCalls == 1 && b.ends.isEmpty
+            c["first_image_completion_ends_processing_before_sources"] = !h.model.isRecognizingImage && !h.model.busy
             p.finishSources(); await h.settle { p.waits[id] != nil }
             c["stage_two_starts_in_background_under_same_allowance"] = p.calls == 1 && b.begins == 1 && b.ends.isEmpty
             p.finish(id); await h.model.waitForWikipediaWork()
@@ -100,6 +102,7 @@ extension C2FixtureHost {
             p.finish(id); await h.model.waitForWikipediaWork()
             let old = h.model.records.first!, image = try? await h.model.archive.image(for: old), starts = h.starts
             c[outcome + "_refresh_reserves_once"] = h.model.retryImage(id: id) && !h.model.retryImage(id: id) && !h.model.canStartRecognition && !h.model.canChoosePhoto
+            c[outcome + "_refresh_image_has_processing_presentation"] = h.model.isRecognizingImage
             await h.settle { h.waiter != nil }
             let pending = h.model.records.first!
             c[outcome + "_pending_retains_same_image_card_and_share"] = pending.id == id && pending.sequence == old.sequence && pending.capturedAt == old.capturedAt && pending.shareDocument() == old.shareDocument() && h.lastJPEG == image && h.starts == starts
@@ -116,6 +119,7 @@ extension C2FixtureHost {
             if outcome == "success" {
                 await h.settle { p.waits[id] != nil }
                 c["refresh_busy_spans_second_stage"] = h.model.busy && !h.model.canStartRecognition && !h.model.canChoosePhoto && !h.model.retryImage(id: id)
+                c["refresh_second_keeps_lock_without_processing_presentation"] = !h.model.isRecognizingImage && h.model.records.first?.status == .succeeded
                 c["new_first_discards_old_wiki_and_raw_association"] = h.model.records.first?.retainedSuccess == nil && h.model.records.first?.currentSemanticReview?.source == nil && h.model.records.first?.currentAttemptID != old.currentAttemptID
                 h.model.foreground(.background)
                 p.finish(id); await h.model.waitForWikipediaWork()
@@ -224,13 +228,33 @@ struct Background62View: View {
                 Text("\(host.calls):\(probe.calls)").accessibilityIdentifier("refresh62-count")
                 if ready { SingleCaptureView(model: host.model, shareProbe: host.shareProbe) }
             }.task {
-                try? FileManager.default.removeItem(at: host.root)
+                let preserve = ProcessInfo.processInfo.arguments.contains("--refresh63-preserve")
+                if !preserve { try? FileManager.default.removeItem(at: host.root) }
                 host.model = host.makeModel(semantic: probe, background: lease); await host.model.bootstrap()
-                let id = await host.recognize45(probe)!
-                probe.finish(id); await host.model.waitForWikipediaWork()
-                if ProcessInfo.processInfo.arguments.contains("--refresh62-missing") {
-                    try? FileManager.default.removeItem(at: host.root.appendingPathComponent(id.uuidString).appendingPathComponent("source.jpg"))
-                    await host.model.reloadHistory()
+                if !preserve && ProcessInfo.processInfo.arguments.contains("--first63-ui") {
+                    _ = await host.model.startRecognition(); host.feed()
+                    await host.settle { host.waiter != nil }
+                } else if !preserve {
+                    let id = await host.recognize45(probe)!
+                    probe.finish(id); await host.model.waitForWikipediaWork()
+                    if ProcessInfo.processInfo.arguments.contains("--refresh62-missing") {
+                        try? FileManager.default.removeItem(at: host.root.appendingPathComponent(id.uuidString).appendingPathComponent("source.jpg"))
+                        await host.model.reloadHistory()
+                    }
+                    if ProcessInfo.processInfo.arguments.contains("--attempt63-legacy") {
+                        let attemptID = UUID()
+                        _ = try? await host.model.archive.beginRetry(id: id, attemptID: attemptID)
+                        _ = try? await host.model.archive.complete(id: id, result: nil, message: "合成舊紀錄", attemptID: attemptID)
+                        let file = host.root.appendingPathComponent(id.uuidString).appendingPathComponent("record.json")
+                        if let data = try? Data(contentsOf: file),
+                           var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           var attempts = json["attempts"] as? [[String: Any]], !attempts.isEmpty {
+                            attempts[attempts.count - 1].removeValue(forKey: "startedAt")
+                            json["attempts"] = attempts
+                            try? JSONSerialization.data(withJSONObject: json).write(to: file)
+                        }
+                        await host.model.reloadHistory()
+                    }
                 }
                 UserDefaults.standard.set(true, forKey: "glance.showModelJSON")
                 ready = true

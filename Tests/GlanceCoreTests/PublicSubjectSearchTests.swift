@@ -35,8 +35,7 @@ private func publicAnswer(_ identity: [String: Any], text: [String] = [], reason
         let query = try #require(GoogleSearchQuery.resolve(result: restored, decodedBarcodes: [code.value], productBarcodes: [code, code]))
         #expect(query.query == expected + " " + code.value)
         let params = URLComponents(url: query.googleURL!, resolvingAgainstBaseURL: false)!.queryItems!
-        #expect(params.first { $0.name == "q" }?.value == query.query)
-        #expect(params.first { $0.name == "lr" }?.value == "lang_zh-TW")
+        #expect(params == [.init(name: "q", value: query.query), .init(name: "gl", value: "tw")])
         #expect(restored == result)
     }
 }

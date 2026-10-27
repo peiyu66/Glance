@@ -500,7 +500,7 @@ private func page(_ title: String = "乐事", _ extract: String = "樂事（Lay'
     let query = try #require(saved.googleSearch)
     #expect(query.query == "Lay's 樂事 樂連連原味洋芋片 0012345678905")
     let params = try #require(URLComponents(url:query.googleURL!,resolvingAgainstBaseURL:false)?.queryItems)
-    #expect(params.contains(.init(name:"gl",value:"tw")) && params.contains(.init(name:"lr",value:"lang_zh-TW")))
+    #expect(params == [.init(name: "q", value: query.query), .init(name: "gl", value: "tw")])
     #expect(saved.shareDocument().links.count == 2 && saved.shareText().contains("[維基百科：樂事（品牌）]"))
     #expect(!saved.shareText().contains("search_identity") && saved.shareText().contains("日本語\r\n包装文字"))
     // Legacy data remains readable, without creating new metadata or new requests.

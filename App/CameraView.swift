@@ -2172,11 +2172,11 @@ struct RecognitionResultCard: View {
                         .accessibilityIdentifier("previousRecognitionLabel")
                 }
                 ForEach(Array(result.names.enumerated()), id: \.offset) { _, name in
-                    Text(name).font(.headline).fixedSize(horizontal: false, vertical: true)
+                    RecognitionWebText(text: name).font(.headline).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
                 if !result.summary.isEmpty {
-                    Text(result.summary).font(.body).fixedSize(horizontal: false, vertical: true)
+                    RecognitionWebText(text: result.summary).font(.body).fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled).accessibilityIdentifier("recognitionSummary")
                 }
                 if sourceImages?.images.image(for: result.sourceImageID) == nil {
@@ -2186,7 +2186,7 @@ struct RecognitionResultCard: View {
                     DisclosureGroup(isExpanded: $originalExpanded) {
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(result.text.enumerated()), id: \.offset) { _, line in
-                                Text(line).font(.body).fixedSize(horizontal: false, vertical: true)
+                                RecognitionWebText(text: line).font(.body).fixedSize(horizontal: false, vertical: true)
                                     .textSelection(.enabled)
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
@@ -2198,8 +2198,7 @@ struct RecognitionResultCard: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("【條碼】").font(.caption).foregroundStyle(.secondary)
                         ForEach(Array(result.barcodes.enumerated()), id: \.offset) { _, barcode in
-                            Text(barcode).font(.body.monospacedDigit())
-                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                            RecognitionBarcodeValue(text: barcode)
                         }
                     }.accessibilityIdentifier("recognitionBarcodes")
                 }
@@ -2396,6 +2395,44 @@ struct RecognitionShareContent {
     }
 }
 
+struct RecognitionCardActionAppearance {
+    let accessibilitySize: Bool
+    var size: CGSize { accessibilitySize ? .init(width: 64, height: 64) : .init(width: 44, height: 36) }
+    var pointSize: CGFloat { accessibilitySize ? 24 : 16 }
+    var font: Font { .system(size: pointSize, weight: .semibold) }
+    func color(enabled: Bool) -> UIColor { enabled ? .systemBlue : .systemGray }
+    func apply(to button: UIButton) {
+        let symbol = UIImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold, scale: .medium)
+        let foreground = color(enabled: button.isEnabled)
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: "square.and.arrow.up", withConfiguration: symbol)
+        configuration.preferredSymbolConfigurationForImage = symbol
+        configuration.baseForegroundColor = foreground
+        configuration.imageColorTransformer = UIConfigurationColorTransformer { _ in foreground }
+        configuration.contentInsets = .zero
+        button.configuration = configuration
+        button.imageView?.adjustsImageSizeForAccessibilityContentSizeCategory = false
+    }
+}
+
+struct RecognitionCardActionLabel: ViewModifier {
+    let appearance: RecognitionCardActionAppearance
+    let enabled: Bool
+    func body(content: Content) -> some View {
+        content
+            .font(appearance.font)
+            .imageScale(.medium)
+            .foregroundStyle(Color(uiColor: appearance.color(enabled: enabled)))
+            .frame(width: appearance.size.width, height: appearance.size.height)
+            .contentShape(Rectangle())
+    }
+}
+
+/// The label owns both enabled and disabled colors; do not add plain-style dimming.
+struct RecognitionCardActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label }
+}
+
 struct RecognitionShareButton: UIViewRepresentable {
     var text:String
     var image:(() -> Data?)? = nil
@@ -2405,6 +2442,11 @@ struct RecognitionShareButton: UIViewRepresentable {
     var snapshot: (() -> RecognitionShareContent?)? = nil
     var imageOnly = false
     var plainTextOnly = false
+    var cardActionAppearance: RecognitionCardActionAppearance? = nil
+    var actionsEnabled = true
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIButton, context: Context) -> CGSize? {
+        cardActionAppearance?.size
+    }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context:Context) -> UIButton {
         let button=UIButton(type:.system)
@@ -2427,7 +2469,14 @@ struct RecognitionShareButton: UIViewRepresentable {
             button.accessibilityHint = "只分享完整模型原始回覆"
             button.accessibilityIdentifier = "shareRecognitionJSON"
         }
-        button.isEnabled=imageOnly ? imageAvailable : imageAvailable || !text.isEmpty
+        button.isEnabled = actionsEnabled && (imageOnly ? imageAvailable : imageAvailable || !text.isEmpty)
+        if let cardActionAppearance {
+            cardActionAppearance.apply(to: button)
+            if !actionsEnabled {
+                button.accessibilityLabel = "完成辨識後可分享"
+                button.accessibilityHint = nil
+            }
+        }
     }
     @MainActor final class Coordinator:NSObject {
         var value:RecognitionShareButton

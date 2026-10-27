@@ -70,6 +70,9 @@ final class C2WriteFault: @unchecked Sendable {
         }
         if ProcessInfo.processInfo.arguments.contains("--onboarding-ui") { configureOnboardingFixture() }
     }
+    static let webHTTP = "http://60.251.161.196/RegDegree/RegisterDegree.aspx"
+    static let webBarcodes = [webHTTP, "https://example.com/path?x=1&y=2#part", "0012345678905", "javascript:alert(1)", "https://", "file:///tmp/example"]
+    static let webResult = RecognitionResult(names: ["https://name.example/a"], summary: "明確網址 https://summary.example/a；電話 0800-388-100、數字 0012345678905、example.com 保留文字。", text: ["原文 https://original.example/a"], barcodes: webBarcodes)
     func makeModel(consent: DataConsentController = .fixtureAccepted(), account: SIWCController = SIWCController(allowsDataTransfer: { true }), access: @escaping () -> Bool = { true }, permission: @escaping () async -> Bool = { true }, requestTimeout: Duration = .seconds(120), semantic: Semantic45Probe? = nil, background: Background62Lease? = nil) -> SingleCaptureController {
         let fault = writeFault
         let reviewProvider: (@MainActor (RecognitionResult, String?, [WikipediaReviewSource], @escaping () throws -> Void) async throws -> String)?
@@ -134,9 +137,11 @@ final class C2WriteFault: @unchecked Sendable {
             if ProcessInfo.processInfo.arguments.contains("--failed-signin-settings") {
                 let trace = UUID(); model.account.authDiagnostic.begin(traceID: trace)
                 model.account.authDiagnostic.record(stage: .tokenExchange, outcome: .failed, category: .http, httpStatus: 400, errorCode: "invalid_grant", traceID: trace, errorDescription: .tokenResponse(Data(#"{"error":"invalid_grant","error_description":"generated token=never-store"}"#.utf8)))
-                model.account.status = "授權未完成（HTTP 400，invalid_grant）。原帳戶已保留。"
+                model.account.status = SIWCSignInMessage.failure(stage: .tokenExchange, category: .http, httpStatus: 400, errorCode: "invalid_grant") + "原帳戶已保留。"
             } else { model.account.status = "" }
         }
+        let webLinks = ProcessInfo.processInfo.arguments.contains("--web-url-links")
+        if webLinks { UserDefaults.standard.set(true, forKey: "glance.showModelJSON") }
         let resume = ProcessInfo.processInfo.arguments.contains("--resume-history")
         if !resume {
             try? FileManager.default.removeItem(at: root)
@@ -149,7 +154,7 @@ final class C2WriteFault: @unchecked Sendable {
                 let fallbackQR = "品名：腹釋寧消化\n諮詢電話：0800-388-100"
                 let isProduct = (ProcessInfo.processInfo.arguments.contains("--product-links") || ProcessInfo.processInfo.arguments.contains("--barcode-only")) && index >= 11
                 let productCode = index == 12 ? C7FactsProbe.firstCode : C7FactsProbe.secondCode
-                let id = UUID(); _ = try? await archive.create(id:id,jpeg:Self.jpeg(UIColor(hue:CGFloat(index)/16,saturation:0.7,brightness:0.9,alpha:1)),capturedAt:Date(), decodedBarcodes: glass ? [glassCode.value] : fallback && index == 11 ? [fallbackQR] : isProduct ? [productCode.value] : nil, productBarcodes: glass ? (index == 12 ? [glassCode] : []) : isProduct ? [productCode] : nil, imageSource: ProcessInfo.processInfo.arguments.contains("--photo57-label") ? .photoLibrary : .camera)
+                let id = UUID(); _ = try? await archive.create(id:id,jpeg:Self.jpeg(UIColor(hue:CGFloat(index)/16,saturation:0.7,brightness:0.9,alpha:1)),capturedAt:Date(), decodedBarcodes: webLinks && index == 12 ? Self.webBarcodes : glass ? [glassCode.value] : fallback && index == 11 ? [fallbackQR] : isProduct ? [productCode.value] : nil, productBarcodes: glass ? (index == 12 ? [glassCode] : []) : isProduct ? [productCode] : nil, imageSource: ProcessInfo.processInfo.arguments.contains("--photo57-label") ? .photoLibrary : .camera)
                 let selectionLinks = ProcessInfo.processInfo.arguments.contains("--selection-links") && index >= 11
                 let search = (ProcessInfo.processInfo.arguments.contains("--search-links") || selectionLinks) && index >= 11 ? PublicSearchQuery(query: "Acme C++ & 測試 #\(index)", category: "product") : nil
                 let isWiki = (ProcessInfo.processInfo.arguments.contains("--wiki-links") || ProcessInfo.processInfo.arguments.contains("--share-links") || isProduct) && index >= 11
@@ -158,9 +163,9 @@ final class C2WriteFault: @unchecked Sendable {
                 let entity38 = ProcessInfo.processInfo.arguments.contains("--entity38-links") && index >= 11
                 let modern = ProcessInfo.processInfo.arguments.contains("--candidate37-links") && index >= 11
                 let textWiki = (ProcessInfo.processInfo.arguments.contains("--text-wiki-links") || modern) && index >= 11
-                let fixtureResult: RecognitionResult = entity39 ? C39EntityProbe.result(index) : entity38 ? C38EntityProbe.result(index) : modern ? C37CandidateProbe.result() : textWiki ? C36TextProbe.result() : actein ? .init(names: [index == 12 ? "Actein 顆粒" : "アクテイン顆粒"], summary: "這是標示為 Actein 的藥品顆粒包裝；顆粒劑是將藥物製成可分散或吞服的小顆粒的劑型。", text: ["synmosa", "3g", "Actein®", "Granules 66.7mg/gm"]) : glass ? .init(names: ["玻璃杯"], text: [glassCode.value], barcodes: [glassCode.value], searchQuery: PublicSearchQuery(query: "玻璃杯", category: "object")) : fallback ? .init(names: [index == 12 ? "腹釋寧消化腸溶糖衣錠" : "胃藥錠劑"], text: ["PHAZIN-P Enteric S.C.TABLETS"], barcodes: index == 11 ? [fallbackQR] : []) : rich ? C9RichShareChecks.result(index) : isWiki ? C5WikipediaProbe.result(index == 12 ? "雨傘" : "剪刀") : .init(names:["已保存第 \(index) 張"],summary:String(repeating:"這是合成說明，用來檢查閱讀位置與來源圖片。",count:5),text:["Original \(index)\n日本語" + (selectionLinks ? "\n" + (index == 12 ? "雨傘" : "剪刀") : "") + (ProcessInfo.processInfo.arguments.contains("--selection-long") ? String(repeating: "\n長文段落 中文 English 日本語 👩🏽‍🔬", count: 30) : "")],barcodes:["00\(index)"],searchQuery:search,wikipediaTopics:selectionLinks ? C5WikipediaProbe.result(index == 12 ? "雨傘" : "剪刀").wikipediaTopics : nil)
+                let fixtureResult: RecognitionResult = webLinks && index == 12 ? Self.webResult : entity39 ? C39EntityProbe.result(index) : entity38 ? C38EntityProbe.result(index) : modern ? C37CandidateProbe.result() : textWiki ? C36TextProbe.result() : actein ? .init(names: [index == 12 ? "Actein 顆粒" : "アクテイン顆粒"], summary: "這是標示為 Actein 的藥品顆粒包裝；顆粒劑是將藥物製成可分散或吞服的小顆粒的劑型。", text: ["synmosa", "3g", "Actein®", "Granules 66.7mg/gm"]) : glass ? .init(names: ["玻璃杯"], text: [glassCode.value], barcodes: [glassCode.value], searchQuery: PublicSearchQuery(query: "玻璃杯", category: "object")) : fallback ? .init(names: [index == 12 ? "腹釋寧消化腸溶糖衣錠" : "胃藥錠劑"], text: ["PHAZIN-P Enteric S.C.TABLETS"], barcodes: index == 11 ? [fallbackQR] : []) : rich ? C9RichShareChecks.result(index) : isWiki ? C5WikipediaProbe.result(index == 12 ? "雨傘" : "剪刀") : .init(names:["已保存第 \(index) 張"],summary:String(repeating:"這是合成說明，用來檢查閱讀位置與來源圖片。",count:5),text:["Original \(index)\n日本語" + (selectionLinks ? "\n" + (index == 12 ? "雨傘" : "剪刀") : "") + (ProcessInfo.processInfo.arguments.contains("--selection-long") ? String(repeating: "\n長文段落 中文 English 日本語 👩🏽‍🔬", count: 30) : "")],barcodes:["00\(index)"],searchQuery:search,wikipediaTopics:selectionLinks ? C5WikipediaProbe.result(index == 12 ? "雨傘" : "剪刀").wikipediaTopics : nil)
                 let json45 = ProcessInfo.processInfo.arguments.contains("--json45")
-                let raw45 = json45 ? Self.json45Raw(index) : nil
+                let raw45 = webLinks && index == 12 ? "{\"url\":\"https://json.example/a\",\"numeric\":\"0012345678905\"}" : json45 ? Self.json45Raw(index) : nil
                 let evidence45 = raw45.map { RecognitionModelResponse.capture($0, sourceImageID: id, attemptID: id, appVersion: "0.1.0", appBuild: "45") }
                 _ = try? await archive.complete(id:id,result:ProcessInfo.processInfo.arguments.contains("--barcode-only") || (json45 && index == 10) ? nil : fixtureResult,message:json45 && index == 10 ? "合成解析失敗" : nil,modelResponse:evidence45)
                 if (textWiki || entity38 || entity39), let saved = try? await archive.load().records.first(where: { $0.id == id }), let result = saved.result {
@@ -382,6 +387,9 @@ final class C2WriteFault: @unchecked Sendable {
     func recordSearch(_ url: URL) {
         // Intercept only in this fixture. Never open Google or another app in tests.
         openedURLs.append(url.absoluteString)
+        if ProcessInfo.processInfo.arguments.contains("--web-url-links") {
+            status = "web-opened-\(openedURLs.count)-calls-\(calls)"; return
+        }
         if let wiki = model.records.first(where: { $0.wikipedia?.canonicalURL == url }) {
             status = "wiki-correct-\(wiki.sequence)-calls-\(calls)"; return
         }
@@ -635,10 +643,6 @@ final class C2WriteFault: @unchecked Sendable {
                 VisibleCropChecksView()
             } else if ProcessInfo.processInfo.arguments.contains("--auth-recovery-checks") {
                 AuthRecoveryChecksView()
-            } else if ProcessInfo.processInfo.arguments.contains("--auth-recovery-ui") {
-                AuthRecoveryUIFixture()
-            } else if ProcessInfo.processInfo.arguments.contains("--siwc-d2-checks") {
-                SIWCDiagnosticChecksView()
             } else if ProcessInfo.processInfo.arguments.contains("--progress-layout") {
                 RecognitionProgressFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--search-row-layout") {
@@ -666,6 +670,9 @@ final class C2WriteFault: @unchecked Sendable {
                         Text(host.status).font(.caption).accessibilityIdentifier("c2-fixture-status")
                             .accessibilityValue(host.openedURLsJSON)
                         if ProcessInfo.processInfo.arguments.contains("--onboarding-ui") { Text("login-\(host.loginCalls)").accessibilityIdentifier("mockLoginCount") }
+                        if ProcessInfo.processInfo.arguments.contains("--web-url-links") {
+                            Button("核對網址複製") { host.status = UIPasteboard.general.string == C2FixtureHost.webHTTP ? "web-copy-correct" : "FAILED-web-copy" }.accessibilityIdentifier("verifyWebCopy")
+                        }
                         Button("影格") { host.feed() }.accessibilityIdentifier("feedFrames")
                         Button("回覆") { Task { await host.complete() } }.accessibilityIdentifier("completeReply")
                         Button("新增") { Task { await host.appendRow() } }.accessibilityIdentifier("appendRow")
@@ -727,9 +734,13 @@ final class C2WriteFault: @unchecked Sendable {
                     }
                     }
                     if host.prepared {
+                        if ProcessInfo.processInfo.arguments.contains("--legacy-web-result") {
+                            RecognitionResultCard(result: C2FixtureHost.webResult, isPrevious: false, initiallyExpanded: true)
+                        } else {
                         SingleCaptureView(model:host.model,shareProbe:host.shareProbe,motionAllowed: !ProcessInfo.processInfo.arguments.contains("--reduce-motion"))
                             .frame(maxWidth: ProcessInfo.processInfo.arguments.contains("--narrow-actions") ? 320 : .infinity)
                             .frame(maxWidth: .infinity)
+                        }
                     }
                 }.task { await host.prepareUI() }
                     .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("--dark") ? .dark : .light)

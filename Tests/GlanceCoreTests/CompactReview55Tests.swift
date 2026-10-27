@@ -45,7 +45,7 @@ private func compact55Source(id: Int = 5501, excerpts: [WikipediaReviewSource.Ex
     let source = compact55Source(excerpts: [.init(id: "p0", text: "Aurora 是一個合成測試品牌。")])
     let data = try WikipediaSemanticReview.input(result: result, rawStageOne: "EXACT ORIGINAL JSON", sources: [source])
     let payload = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-    #expect(payload["input_version"] as? Int == 2 && payload["raw_stage_one_json"] is NSNull)
+    #expect(payload["input_version"] as? Int == 3 && payload["raw_stage_one_json"] is NSNull)
     #expect((payload["stage_one"] as? [String: Any])?["text_is_partial"] as? Bool == true)
     #expect(!String(decoding: data, as: UTF8.self).contains("EXACT ORIGINAL JSON"))
 }
@@ -153,7 +153,8 @@ private actor Compact55TopicTransport {
         let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
         let query = items.first { $0.name == "gsrsearch" }?.value
         let ids: [Int]
-        if let query { searches.append(query); ids = query == "台北" ? [101,102,103] : [201,202,203] }
+        if items.contains(where: { $0.name == "titles" }) { ids = [] } // public text entities now share the exact batch
+        else if let query { searches.append(query); ids = query == "台北" ? [101,102,103] : [201,202,203] }
         else { extracts += 1; ids = [Int(items.first { $0.name == "pageids" }!.value!)!] }
         let rows: [[String: Any]] = ids.map { ["pageid": $0, "ns": 0, "title": "合成地名\($0)", "canonicalurl": "https://zh.wikipedia.org/wiki/Fixture\($0)", "extract": "本段是合成公開地名資料，用於驗證查詢分配。"] }
         return .init(data: try JSONSerialization.data(withJSONObject: ["query": ["pages": rows]]), status: 200, url: request.url)
@@ -163,9 +164,9 @@ private actor Compact55TopicTransport {
     let result = compact55TextTopics(), transport = Compact55TopicTransport()
     #expect(WikipediaReviewCollector.queries(for: result) == ["台北", "社子"])
     let sources = try await WikipediaReviewCollector(transport: { try await transport.fetch($0) }).collect(for: result)
-    #expect(sources.map(\.pageID) == [101,201,102])
-    #expect(Set(await transport.searches) == ["台北", "社子"] && sources.count == 3)
-    #expect(await transport.extracts == 3)
+    #expect(sources.map(\.pageID) == [101,201,102,202,103])
+    #expect(Set(await transport.searches) == ["台北", "社子"] && sources.count == 5)
+    #expect(await transport.extracts == 5)
 }
 @Test func compact55ContextualLinkPreservesObjectNameSearchOriginalAndExplicitRole() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

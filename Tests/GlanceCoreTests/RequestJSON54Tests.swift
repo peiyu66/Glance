@@ -149,7 +149,7 @@ private func wikiPage54() -> [String: Any] {
     let values = try await WikipediaReviewCollector(transport: { request in
         let params = Dictionary(uniqueKeysWithValues: URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.map { ($0.name, $0.value!) })
         #expect(params["errorformat"] == "raw")
-        if params["generator"] != nil || params["titles"] != nil { #expect(params["exchars"] == "1200" && params["exlimit"] == "3" && params["exintro"] == "1") }
+        if params["generator"] != nil || params["titles"] != nil { #expect(params["exchars"] == "1200" && params["exlimit"] == (params["titles"] != nil ? "8" : "3") && params["exintro"] == "1") }
         else { #expect(params["exchars"] == nil && params["exlimit"] == "1" && params["pageids"] == "54") }
         return .init(data: try JSONSerialization.data(withJSONObject: wikiPage54()), status: 200, url: request.url)
     }).collect(for: result54())

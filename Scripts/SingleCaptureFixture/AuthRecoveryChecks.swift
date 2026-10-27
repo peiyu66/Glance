@@ -39,6 +39,7 @@ private final class RecoveryProtocol: URLProtocol, @unchecked Sendable {
             copy.httpBody = bytes
         }
         let (status, data) = RecoveryWire.shared.receive(copy)
+        if status == -1 { client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost)); return }
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data); client?.urlProtocolDidFinishLoading(self)
@@ -76,15 +77,14 @@ private final class RecoveryProtocol: URLProtocol, @unchecked Sendable {
 }
 
 extension SIWCController {
-    fileprivate func recoveryFixtureStart(id: String? = nil, confirmed: Bool = false, port: UInt16 = 42001) throws -> SIWCPending {
-        busy = true; attempt = UUID(); prepareAuthDiagnostics(); authStep(.registration)
-        try prepareRegistrationAttempt(recoveryID: id, confirmedSameAccountAndWorkspace: confirmed)
+    fileprivate func recoveryFixtureStart(port: UInt16 = 42001, expired: Bool = false) throws -> SIWCPending {
+        busy = true; attempt = UUID(); prepareSignInState(); authStep(.registration)
+        try prepareRegistrationAttempt()
         authStep(.storage); try persistRegistrationState()
         discovery = SIWCDiscovery(issuer: SIWCProtocol.issuer, authorization_endpoint: SIWCProtocol.issuer + "/api/accounts/authorize",
             token_endpoint: SIWCProtocol.issuer + "/api/accounts/oauth/token", jwks_uri: SIWCProtocol.issuer + "/.well-known/jwks.json", revocation_endpoint: SIWCProtocol.issuer + "/oauth/revoke")
-        let pending = try SIWCPending.fresh(port: port, clientID: authClientSelection().id)
+        let pending = try SIWCPending.fresh(port: port, clientID: nil, now: expired ? Date().addingTimeInterval(-600) : Date())
         currentPending = pending; authStep(.browser)
-        recordAuthorizationBindings(url: pending.authorize(hostID: saved!.hostID), pending: pending)
         return pending
     }
     fileprivate func recoveryFixtureSubmit(_ original: SIWCPending, code: String, client: String? = "recovery-test-client", state: String? = nil) async {
@@ -94,7 +94,6 @@ extension SIWCController {
         let target = "/auth/callback?" + String(decoding: SIWCProtocol.form(fields), as: UTF8.self)
         do {
             let callback = try pending.callback(target: target)
-            authCallbackAt = ProcessInfo.processInfo.systemUptime
             authRecord(.callback, .succeeded); currentPending = nil
             await exchange(pending: pending, code: callback.code, issued: callback.clientID, selected: nil, transaction: attempt)
         } catch { fail(error); endAttempt() }
@@ -138,107 +137,73 @@ private struct RecoverySigner {
 }
 
 @MainActor private enum RecoveryChecks {
-    static func eligible(knownIdentity: Bool = false) async throws -> (RecoveryStore, SIWCController, SIWCPending) {
-        let store = RecoveryStore(knownPendingIdentity: knownIdentity), model = store.controller()
-        RecoveryWire.shared.configure()
-        let pending = try model.recoveryFixtureStart()
-        await model.recoveryFixtureSubmit(pending, code: "first-code-secret")
-        return (store, model, pending)
-    }
     static func run() async throws -> [String: Bool] {
         var checks: [String: Bool] = [:]
         let signer = try RecoverySigner()
-        let (store, model, first) = try await eligible()
-        let id = model.registrationRetryID!
-        checks["first_invalid_grant_offers_one_retry"] = store.value.recoveryRegistrationID == id && store.value.pendingRegistrations.first?.retry?.state == .available
-        checks["first_failure_preserves_pro_and_has_one_exchange"] = store.oldPreserved && RecoveryWire.shared.captured.count == 1 && model.authDiagnostic.latestSignIn?.failure?.httpStatus == 400
-        checks["reload_keeps_exact_registration_offer"] = store.controller().registrationRetryID == id
-        let writes = store.writes, calls = RecoveryWire.shared.captured.count
-        model.retryRegistration(id, confirmedSameAccountAndWorkspace: false)
-        model.retryRegistration("unrelated-registration", confirmedSameAccountAndWorkspace: true)
-        checks["unconfirmed_or_stale_choice_has_no_effect"] = store.writes == writes && RecoveryWire.shared.captured.count == calls && model.registrationRetryID == id
-        let retry = try model.recoveryFixtureStart(id: id, confirmed: true, port: 42002)
-        checks["permit_consumed_and_persisted_before_transport"] = store.value.pendingRegistrations.first?.retry?.state == .consumed && RecoveryWire.shared.captured.count == calls
-        checks["restart_does_not_restore_consumed_offer"] = store.controller().registrationRetryID == nil
-        checks["fresh_state_nonce_pkce_and_redirect"] = first.state != retry.state && first.nonce != retry.nonce && first.verifier != retry.verifier && first.redirect != retry.redirect
-        let auth = URLComponents(url: retry.authorize(hostID: store.value.hostID), resolvingAgainstBaseURL: false)!.queryItems!
-        checks["same_client_host_no_pro_hint"] = retry.clientID == "recovery-test-client" && store.value.hostID == "synthetic-stable-host-secret" && !auth.contains { $0.name == "id_token_hint" }
-        RecoveryWire.shared.configure()
-        await model.recoveryFixtureSubmit(retry, code: "second-code-secret", client: nil)
-        let wire = RecoveryWire.shared.captured
-        var formURL = URLComponents(); formURL.percentEncodedQuery = String(decoding: wire.first?.httpBody ?? Data(), as: UTF8.self)
-        let form = Dictionary(uniqueKeysWithValues: (formURL.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-        checks["actual_retry_wire_uses_new_code_and_bound_client_pkce_redirect"] = form["code"] == "second-code-secret" && form["client_id"] == retry.clientID && form["code_verifier"] == retry.verifier && form["redirect_uri"] == retry.redirect && wire.count == 1
-        checks["second_failure_never_reoffers_or_auto_retries"] = model.registrationRetryID == nil && store.oldPreserved && !model.busy && model.status.contains("不會自動重試")
-        model.retryRegistration(id, confirmedSameAccountAndWorkspace: true)
-        checks["third_start_refused"] = RecoveryWire.shared.captured.count == 1 && !model.busy
-        let bindings = model.authDiagnostic.events.compactMap(\.binding)
-        checks["diagnostic_marks_retained_client_and_user_confirmation_only"] = bindings.contains { $0.clientSource == .retainedRetry && $0.retryBudgetConsumed == true && $0.retryStatePersisted == true && $0.sameAccountWorkspaceConfirmedByUser == true }
-        let encoded = String(decoding: try JSONEncoder().encode(model.authDiagnostic), as: UTF8.self)
-        checks["diagnostic_contains_no_secrets_or_raw_identity"] = !["old-pro-access-secret", "old-pro-refresh-secret", "old-pro-id-secret", "old-pro-client-secret", "old-pro-subject-secret", "synthetic-stable-host-secret", "recovery-test-client", "first-code-secret", "second-code-secret", first.state, retry.nonce, retry.verifier].contains { encoded.contains($0) }
-        let pendingJSON = String(decoding: try JSONEncoder().encode(store.value.pendingRegistrations), as: UTF8.self)
-        checks["pending_records_never_store_code_or_pkce_or_token"] = !["first-code-secret", "second-code-secret", first.verifier, retry.verifier, "access", "id_token"].contains { pendingJSON.contains($0) }
-
-        for mode in ["success", "nonce", "audience", "signature", "scope", "subject", "save"] {
-            let (s, m, _) = try await eligible(knownIdentity: mode == "subject")
-            let p = try m.recoveryFixtureStart(id: m.registrationRetryID!, confirmed: true)
-            if mode == "save" { s.reject = { $0.selected != "old-pro-client-secret:old-pro-subject-secret" } }
-            RecoveryWire.shared.configure(status: 200, response: try signer.response(pending: p, mode: mode), jwks: signer.jwks)
-            await m.recoveryFixtureSubmit(p, code: "fresh-retry-code")
-            let paths = RecoveryWire.shared.captured.compactMap { $0.url?.path }
-            if mode == "success" {
-                checks["verified_new_identity_switches_only_after_save"] = m.account?.subject == "new-subject-secret" && s.value.selected == m.account?.id && m.authDiagnostic.latestSignIn?.outcome == .succeeded
-                checks["success_keeps_old_pro_record_and_clears_pending"] = s.value.accounts.contains { $0.clientID == "old-pro-client-secret" && $0.tokens?.access == "old-pro-access-secret" } && s.value.pendingRegistrations.isEmpty && s.value.recoveryRegistrationID == nil
-            } else { checks["retry_\(mode)_failure_keeps_old_credentials"] = s.oldPreserved && m.account?.clientID == "old-pro-client-secret" && m.authDiagnostic.latestSignIn?.outcome == .failed && m.registrationRetryID == nil }
-            checks["retry_\(mode)_has_no_models_or_ai_or_extra_token_calls"] = paths == ["/api/accounts/oauth/token", "/.well-known/jwks.json"]
+        for (label, status) in [("invalid_grant",400),("server",503),("transport",-1)] {
+            let store=RecoveryStore(), model=store.controller()
+            RecoveryWire.shared.configure(status:status)
+            let pending=try model.recoveryFixtureStart()
+            model.beginNewAccount()
+            checks[label+"_busy_begin_does_not_start_second_login"] = RecoveryWire.shared.captured.isEmpty
+            await model.recoveryFixtureSubmit(pending,code:"unique-"+label)
+            checks[label+"_once_and_original_account_preserved"] = RecoveryWire.shared.captured.count == 1 && store.oldPreserved && !model.busy
+            checks[label+"_paid_requirement_is_guidance"] = model.status.contains(SIWCSignInMessage.requirement) && model.status.contains("確認目前登入的帳戶")
+            checks[label+"_no_retained_client_retry"] = store.value.recoveryRegistrationID == nil && store.value.pendingRegistrations.allSatisfy { $0.retry == nil }
+            if label == "transport" { checks["network_not_invented_http_or_free_detection"] = model.status.contains("網路") && !model.status.contains("HTTP") }
+            if label == "server" { checks["server_classification_preserved"] = model.status.contains("服務暫時") && model.status.contains("503") }
+            let requests=RecoveryWire.shared.captured.count
+            model.load()
+            checks[label+"_reload_no_request_and_keeps_failure"] = RecoveryWire.shared.captured.count == requests && model.status.contains("原帳戶已保留")
         }
-        for mode in ["cancel", "wrong_client", "wrong_state", "reused_code", "consume_save", "discovery"] {
-            let (s, m, _) = try await eligible(); let id = m.registrationRetryID!
-            RecoveryWire.shared.configure()
-            if mode == "consume_save" {
-                s.reject = { $0.pendingRegistrations.contains { $0.retry?.state == .consumed } }
-                m.retryRegistration(id, confirmedSameAccountAndWorkspace: true)
-                checks["consumption_save_failure_stops_before_network"] = !m.busy && RecoveryWire.shared.captured.isEmpty && s.oldPreserved && m.registrationRetryID == nil && s.value.pendingRegistrations.first?.retry?.state == .available
-            } else if mode == "discovery" {
-                m.retryRegistration(id, confirmedSameAccountAndWorkspace: true)
-                m.retryRegistration(id, confirmedSameAccountAndWorkspace: true)
-                for _ in 0..<200 { if !m.busy { break }; try? await Task.sleep(for: .milliseconds(10)) }
-                checks["double_tap_and_discovery_failure_consume_once_before_browser"] = !m.busy && m.registrationRetryID == nil && s.oldPreserved && RecoveryWire.shared.captured.compactMap { $0.url?.path } == ["/.well-known/openid-configuration"]
+        for mode in ["success","scope","signature","nonce","audience"] {
+            let store=RecoveryStore(), model=store.controller(), pending=try model.recoveryFixtureStart()
+            RecoveryWire.shared.configure(status:200,response:try signer.response(pending:pending,mode:mode),jwks:signer.jwks)
+            await model.recoveryFixtureSubmit(pending,code:"code-"+mode)
+            checks[mode+"_exact_exchange_and_jwks"] = RecoveryWire.shared.captured.map { $0.url!.path } == ["/api/accounts/oauth/token","/.well-known/jwks.json"]
+            if mode == "success" {
+                checks["valid_success_persists_and_changes_account"] = model.account?.subject == "new-subject-secret" && model.planAccessReady && model.status == "登入完成。"
             } else {
-                let p = try m.recoveryFixtureStart(id: id, confirmed: true)
-                if mode == "cancel" { m.cancel() }
-                else { await m.recoveryFixtureSubmit(p, code: mode == "reused_code" ? "first-code-secret" : "fresh-retry-code", client: mode == "wrong_client" ? "other-client" : nil, state: mode == "wrong_state" ? "stale-state" : nil) }
-                checks["\(mode)_stops_without_token_exchange_or_restoring_offer"] = RecoveryWire.shared.captured.isEmpty && m.registrationRetryID == nil && !m.busy && s.oldPreserved && s.controller().registrationRetryID == nil
+                checks[mode+"_preserves_valid_original_credentials"] = store.oldPreserved && model.status.contains(SIWCSignInMessage.requirement)
             }
         }
         do {
-            let s = RecoveryStore(), m = s.controller(); RecoveryWire.shared.configure()
-            let p = try m.recoveryFixtureStart()
-            s.reject = { $0.pendingRegistrations.contains { $0.retry?.state == .available } }
-            await m.recoveryFixtureSubmit(p, code: "one-code")
-            checks["offer_save_failure_keeps_400_and_original_credentials"] = m.registrationRetryID == nil && s.oldPreserved && m.authDiagnostic.latestSignIn?.failure?.httpStatus == 400 && m.status.contains("無法保存續試狀態")
+            let store=RecoveryStore(), model=store.controller()
+            RecoveryWire.shared.configure()
+            let first=try model.recoveryFixtureStart()
+            await model.recoveryFixtureSubmit(first,code:"same-code")
+            let second=try model.recoveryFixtureStart(port:42002)
+            await model.recoveryFixtureSubmit(second,code:"same-code")
+            checks["duplicate_code_never_exchanged_twice"] = RecoveryWire.shared.captured.count == 1 && store.oldPreserved && model.status.contains("已使用")
         }
         do {
-            let s = RecoveryStore()
-            s.value.pendingRegistrations = [SIWCPendingRegistration(id: "legacy", label: "連線 2", clientID: "legacy-client", savedAt: Date())]
-            s.value.recoveryRegistrationID = "legacy"
-            let restored = try JSONDecoder().decode(SIWCSaved.self, from: JSONEncoder().encode(s.value))
-            s.value = restored
-            checks["legacy_pending_never_guessed_as_retryable"] = s.controller().registrationRetryID == nil && restored.pendingRegistrations.first?.retry == nil
-        }
-        for (status, code) in [(400, "invalid_client"), (403, "access_denied"), (500, "invalid_grant")] {
-            let s = RecoveryStore(), m = s.controller()
-            RecoveryWire.shared.configure(status: status, response: try JSONSerialization.data(withJSONObject: ["error": code]))
-            let p = try m.recoveryFixtureStart()
-            await m.recoveryFixtureSubmit(p, code: "first-other-error-code")
-            checks["http_\(status)_\(code)_never_opens_retry"] = m.registrationRetryID == nil && s.oldPreserved && RecoveryWire.shared.captured.count == 1
+            let store=RecoveryStore(), model=store.controller()
+            RecoveryWire.shared.configure()
+            _=try model.recoveryFixtureStart();model.cancel()
+            checks["cancel_does_not_exchange_or_replace_account"] = RecoveryWire.shared.captured.isEmpty && store.oldPreserved && !model.busy && model.status.contains("取消")
         }
         do {
-            let (s, m, _) = try await eligible()
-            let oldID = m.registrationRetryID!, oldCount = s.value.pendingRegistrations.count
-            let fresh = try m.recoveryFixtureStart()
-            checks["explicit_new_account_clears_offer_without_deleting_credentials"] = fresh.clientID == nil && m.registrationRetryID == nil && s.oldPreserved && s.value.pendingRegistrations.count == oldCount && s.value.pendingRegistrations.first?.id == oldID
-            m.cancel()
+            let store=RecoveryStore(), model=store.controller()
+            RecoveryWire.shared.configure()
+            let expired=try model.recoveryFixtureStart(expired:true)
+            await model.recoveryFixtureSubmit(expired,code:"expired-code")
+            checks["expired_callback_never_exchanged"] = RecoveryWire.shared.captured.isEmpty && store.oldPreserved && model.status.contains("逾時")
+        }
+        do {
+            let store=RecoveryStore(), model=store.controller()
+            RecoveryWire.shared.configure()
+            let pending=try model.recoveryFixtureStart()
+            await model.recoveryFixtureSubmit(pending,code:"wrong-state-code",state:"wrong")
+            checks["wrong_state_never_exchanged"] = RecoveryWire.shared.captured.isEmpty && store.oldPreserved
+        }
+        for afterExchange in [false, true] {
+            let store=RecoveryStore(), model=store.controller(), pending=try model.recoveryFixtureStart()
+            store.reject = { next in afterExchange ? next.accounts.contains { $0.subject == "new-subject-secret" } : !next.pendingRegistrations.isEmpty }
+            RecoveryWire.shared.configure(status:200,response:try signer.response(pending:pending),jwks:signer.jwks)
+            await model.recoveryFixtureSubmit(pending,code:afterExchange ? "save-failure" : "checkpoint-failure")
+            let label=afterExchange ? "session_save_failure" : "registration_checkpoint_failure"
+            checks[label+"_preserves_old_account_and_storage_reason"] = store.oldPreserved && !model.busy && model.status.contains("本機安全會話") && !model.status.contains(SIWCSignInMessage.requirement)
+            checks[label+"_request_count"] = RecoveryWire.shared.captured.count == (afterExchange ? 2 : 0)
         }
         checks["default_network_guard_never_triggered"] = C8NetworkProbe.shared.count == 0
         return checks
@@ -246,30 +211,16 @@ private struct RecoverySigner {
 }
 
 struct AuthRecoveryChecksView: View {
-    @State private var status = "running"
+    @State private var status="running"
     var body: some View {
         Text(status).accessibilityIdentifier("auth-recovery-result").task {
             do {
-                let checks = try await RecoveryChecks.run(), passed = checks.values.allSatisfy { $0 }
-                let report: [String: Any] = ["passed": passed, "checks": checks, "count": checks.count, "realNetworkRequests": 0, "keychainAccess": false, "browserStarted": false]
-                let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("auth-recovery-checks.json")
-                try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted]).write(to: url)
-                status = passed ? "passed \(checks.count)" : "FAILED " + checks.filter { !$0.value }.map(\.key).sorted().joined(separator: ",")
-            } catch { status = "FAILED fixture setup" }
+                let checks=try await RecoveryChecks.run();let passed=checks.values.allSatisfy { $0 }
+                let report: [String:Any] = ["passed":passed,"checks":checks,"count":checks.count,"realNetworkRequests":0,"keychainAccess":false]
+                let root=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0]
+                try JSONSerialization.data(withJSONObject:report,options:[.sortedKeys,.prettyPrinted]).write(to:root.appendingPathComponent("paid70-auth-checks.json"))
+                status=passed ? "passed \(checks.count)" : "FAILED " + checks.filter { !$0.value }.map(\.key).sorted().joined(separator:",")
+            } catch { status="FAILED local fixture" }
         }
-    }
-}
-
-struct AuthRecoveryUIFixture: View {
-    @State private var model: SIWCController?
-    var body: some View {
-        Form {
-            if let model {
-                SIWCAccountActions(model: model)
-                Text(model.status).accessibilityIdentifier("recoveryStatus")
-                Text(model.registrationRetryID == nil ? "consumed" : "available").accessibilityIdentifier("recoveryPermit")
-            } else { Text("preparing") }
-        }.environment(\.dynamicTypeSize, ProcessInfo.processInfo.arguments.contains("--maximum-type") ? .accessibility5 : .large)
-        .task { model = try? await RecoveryChecks.eligible().1 }
     }
 }

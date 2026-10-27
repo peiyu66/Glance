@@ -1,0 +1,17 @@
+import Foundation
+@main struct Dump {
+    static func main() throws {
+        let entities = [SearchEntity(kind: .product, name: "曙光旋脆片23", aliases: ["Aurora Swirls 23"], sourceText: "AURORA SWIRLS 23"), SearchEntity(id: 1, role: .related, kind: .brand, name: "曙光", aliases: ["Aurora"], sourceText: "AURORA", relation: .brand_of, relatedTo: 0), SearchEntity(id: 2, role: .related, kind: .company, name: "曙光製造公司", aliases: ["Aurora Works"], sourceText: "Made by Aurora Works", relation: .manufacturer_of, relatedTo: 0)]
+        let example: [String: Any] = ["schema_version": 17, "names": ["曙光旋脆片23"], "summary": "曙光旋脆片23是一款合成零食產品。", "text": ["AURORA SWIRLS 23", "AURORA", "Made by Aurora Works"], "search_entities": try JSONSerialization.jsonObject(with: JSONEncoder().encode(entities))]
+        let raw = String(decoding: try JSONSerialization.data(withJSONObject: example, options: [.sortedKeys]), as: UTF8.self)
+        let parsed = try CameraAnswer.parse(raw, expectingStructured: true)
+        let excerpt = "Aurora Swirls 23 is a synthetic snack product from the Aurora brand."
+        let source = WikipediaReviewSource(pageID: 4501, title: "曙光旋脆片23", url: URL(string: "https://zh.wikipedia.org/wiki/Aurora_Swirls")!, fetchedAt: Date(timeIntervalSince1970: 1792368000), excerpts: [.init(id: "p0", text: excerpt)])
+        let request = try JSONSerialization.jsonObject(with: WikipediaSemanticReview.request(result: parsed, rawStageOne: raw, sources: [source], catalog: [.init(slug: "gpt-6-luna", display_name: "Fixture", visibility: "list")]))
+        let answer = WikipediaReviewAnswer(decision: .selected, sourceID: source.id, relationship: .same_entity, searchName: "曙光旋脆片23", summary: "曙光旋脆片23是曙光品牌的合成零食產品。", citations: [.init(excerptID: "p0", quote: excerpt)])
+        let answerData = try JSONEncoder().encode(answer)
+        _ = try WikipediaSemanticReview.parse(String(decoding: answerData, as: UTF8.self), sources: [source])
+        let data = try JSONSerialization.data(withJSONObject: ["inputVersion":WikipediaSemanticReview.inputVersion,"stage1Revision":CameraAnswer.promptRevision,"stage1Prompt":CameraAnswer.prompt,"stage1Format":CameraAnswerSchema.format,"stage2Revision":WikipediaSemanticReview.promptRevision,"stage2Prompt":WikipediaSemanticReview.prompt,"stage2Format":WikipediaSemanticReview.format,"stage1ExampleResult":example,"stage2ExampleRequest":request,"stage2ExampleAnswer":try JSONSerialization.jsonObject(with: answerData)],options:[.prettyPrinted,.sortedKeys,.withoutEscapingSlashes])
+        print(String(decoding:data,as:UTF8.self))
+    }
+}

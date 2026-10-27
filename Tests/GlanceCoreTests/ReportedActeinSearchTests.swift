@@ -29,7 +29,7 @@ import Testing
                 let item = card(.init(names: [name], text: ocr, searchQuery: base))
                 let url = try #require(item.googleSearch?.googleURL)
                 #expect(item.googleSearch?.query == name)
-                #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: name), .init(name: "gl", value: "tw"), .init(name: "lr", value: "lang_zh-TW")])
+                #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: name), .init(name: "gl", value: "tw")])
                 #expect(item.shareDocument().links.first?.label == "Google 搜尋：" + name)
                 #expect(item.result?.text == ocr)
             }

@@ -2,6 +2,32 @@ import XCTest
 import UIKit
 
 extension CaptureUITests {
+    func testPrivacy63SharedBackgroundDisclosureDoesNotAcceptConsent() { checkPrivacy63([]) }
+    func testPrivacy63SharedBackgroundDisclosureAtMaximumType() { checkPrivacy63(["--maximum-type"]) }
+    private func checkPrivacy63(_ options: [String]) {
+        let app = launch(["--onboarding-ui", "--existing-login"] + options)
+        XCTAssertTrue(app.buttons["consentAccept"].waitForExistence(timeout: 15))
+        let firstUse = app.staticTexts["consentBackgroundExplanation"]
+        scrollConsent(firstUse, app: app)
+        let explanation = firstUse.label
+        XCTAssertTrue(explanation.contains("第二次文字 AI 請求也可能在背景才開始"))
+        XCTAssertTrue(explanation.contains("不會自動重送"))
+        let policy = app.descendants(matching: .any).matching(identifier: "consentPrivacyLink").firstMatch
+        scrollConsent(policy, app: app); XCTAssertTrue(policy.exists)
+        XCTAssertTrue(app.buttons["consentAccept"].isHittable)
+        app.buttons["consentDefer"].tap(); ready(app)
+        XCTAssertEqual(app.staticTexts["mockLoginCount"].label, "login-0")
+        XCTAssertTrue(app.buttons["完成首次設定以開始辨識"].exists)
+        app.buttons["設定"].tap()
+        let settings = app.staticTexts["settingsBackgroundExplanation"]
+        scrollSettings(settings, app: app); XCTAssertEqual(settings.label, explanation)
+        let settingsPolicy = app.descendants(matching: .any).matching(identifier: "settingsPrivacyLink").firstMatch
+        scrollSettings(settingsPolicy, app: app); XCTAssertTrue(settingsPolicy.exists)
+        XCTAssertFalse(app.buttons["consentWithdraw"].exists)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "privacy63-settings-\(options.isEmpty ? "normal" : "large")"
+        shot.lifetime = .keepAlways; add(shot)
+    }
     func testBackground62FinitePipelineRefreshAndRecovery() {
         let app = launch(["--background62-checks"])
         let status = app.staticTexts["background62-checks"]
@@ -12,6 +38,128 @@ extension CaptureUITests {
     }
     func testRefresh62ActionOrderAndEntirePipelineLock() { checkRefresh62([]) }
     func testRefresh62ActionOrderAndEntirePipelineLockAtLargeType() { checkRefresh62(["--refresh62-large"]) }
+    func testCardActionJSONVisibilitySpacing() { checkCardActionJSONVisibilitySpacing([]) }
+    func testCardActionJSONVisibilitySpacingAtLargeType() { checkCardActionJSONVisibilitySpacing(["--refresh62-large"]) }
+    func testCardActionsUseSameEnabledAndDisabledAppearance() { checkCardActionAppearance([]) }
+    func testCardActionsUseSameEnabledAndDisabledAppearanceAtLargeType() { checkCardActionAppearance(["--refresh62-large"]) }
+    private func checkCardActionAppearance(_ options: [String]) {
+        let app = launch(["--refresh62-ui", "--first63-ui"] + options)
+        let json = app.buttons["modelJSON-1"]
+        let refresh = app.buttons["refreshRecognition-1"]
+        let share = app.otherElements["archiveCard-1"].buttons["shareRecognitionResult"]
+        XCTAssertTrue(json.waitForExistence(timeout: 15))
+        let controls = [json, refresh, share]
+        let expected = options.isEmpty ? CGSize(width: 44, height: 36) : CGSize(width: 64, height: 64)
+        for enabled in [false, true] {
+            if enabled {
+                app.buttons["refresh62-first"].tap()
+                // Appearance depends on stage one; stage-two scheduling is tested separately.
+                scrollWait(json, "enabled == true")
+            }
+            for _ in 0..<4 {
+                if controls.allSatisfy({ $0.frame.maxY < app.frame.maxY - 24 }) { break }
+                app.collectionViews.firstMatch.swipeUp()
+            }
+            for control in controls {
+                XCTAssertEqual(control.isEnabled, enabled)
+                XCTAssertEqual(control.frame.width, expected.width, accuracy: 0.5)
+                XCTAssertEqual(control.frame.height, expected.height, accuracy: 0.5)
+                XCTAssertGreaterThan(control.frame.minY, 0)
+                XCTAssertLessThan(control.frame.maxY, app.frame.maxY)
+            }
+            XCTAssertEqual(refresh.frame.minX - json.frame.maxX, 12, accuracy: 1)
+            XCTAssertEqual(share.frame.minX - refresh.frame.maxX, 12, accuracy: 1)
+            XCTAssertEqual(json.frame.midY, share.frame.midY, accuracy: 0.5)
+            if enabled { XCTAssertTrue(controls.allSatisfy(\.isHittable)) }
+            let name = "card-style-\(enabled ? "enabled" : "disabled")-\(options.isEmpty ? "normal" : "large")"
+            let frames = zip(["json", "refresh", "share"], controls).map { key, control in
+                let rect = control.frame
+                return ["name": key, "x": rect.minX, "y": rect.minY,
+                        "width": rect.width, "height": rect.height] as [String: Any]
+            }
+            let data = try! JSONSerialization.data(withJSONObject: ["enabled": enabled,
+                "screenWidth": app.frame.width, "screenHeight": app.frame.height, "controls": frames], options: [.sortedKeys])
+            let geometry = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            geometry.name = name + "-geometry"; geometry.lifetime = .keepAlways; add(geometry)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = name + "-screen"; screenshot.lifetime = .keepAlways; add(screenshot)
+        }
+        XCTAssertEqual(share.label, "分享結果")
+    }
+    private func checkCardActionJSONVisibilitySpacing(_ options: [String]) {
+        let app = launch(["--refresh62-ui"] + options)
+        let card = app.otherElements["archiveCard-1"]
+        let refresh = app.buttons["refreshRecognition-1"]
+        let share = card.buttons["shareRecognitionResult"]
+        let json = app.buttons["modelJSON-1"]
+        let actions = app.otherElements["archiveActions-1"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 15))
+        for enabled in [true, false, true] {
+            if (json.exists != enabled) {
+                app.buttons["設定"].tap()
+                let toggle = app.switches["showModelJSON"]
+                scrollSettings(toggle, app: app)
+                toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+                XCTAssertEqual(toggle.value as? String, enabled ? "1" : "0")
+                app.buttons["完成"].tap()
+            }
+            for _ in 0..<4 {
+                if refresh.isHittable && share.isHittable { break }
+                app.collectionViews.firstMatch.swipeUp()
+            }
+            XCTAssertEqual(json.exists, enabled)
+            XCTAssertTrue(refresh.isHittable && share.isHittable)
+            XCTAssertTrue(refresh.isEnabled && share.isEnabled)
+            XCTAssertEqual(share.frame.minX - refresh.frame.maxX, 12, accuracy: 1)
+            XCTAssertGreaterThanOrEqual(refresh.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(share.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(refresh.frame.height, 36)
+            XCTAssertGreaterThanOrEqual(share.frame.height, 36)
+            let expectedWidth = refresh.frame.width + share.frame.width + 12
+                + (enabled ? json.frame.width + 12 : 0)
+            XCTAssertEqual(actions.frame.width, expectedWidth, accuracy: 1)
+            if enabled {
+                XCTAssertTrue(json.isHittable && json.isEnabled)
+                XCTAssertLessThan(json.frame.midX, refresh.frame.midX)
+                json.tap()
+                XCTAssertTrue(app.staticTexts["modelJSONMessage"].waitForExistence(timeout: 5))
+                app.buttons["closeModelJSON"].tap()
+            }
+            let evidence = XCTAttachment(string: "JSON=\(enabled), refresh=\(refresh.frame), share=\(share.frame), json=\(json.exists ? String(describing: json.frame) : "absent")")
+            evidence.name = "card-actions-\(enabled)-\(options.isEmpty ? "normal" : "large")"
+            evidence.lifetime = .keepAlways; add(evidence)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = (evidence.name ?? "card-actions") + "-screen"
+            screenshot.lifetime = .keepAlways; add(screenshot)
+        }
+    }
+    func testFirst63ProcessingEndsBeforeDelayedWikipedia() {
+        let app = launch(["--refresh62-ui", "--first63-ui"])
+        let start = app.buttons["continueCapture"]
+        XCTAssertTrue(start.waitForExistence(timeout: 15))
+        XCTAssertEqual(start.label, "辨識中")
+        XCTAssertFalse(start.isEnabled)
+        XCTAssertFalse(app.buttons["choosePhoto"].isEnabled)
+        let json = app.buttons["modelJSON-1"]
+        let share = app.otherElements["archiveCard-1"].buttons["shareRecognitionResult"]
+        XCTAssertFalse(json.isEnabled && share.isEnabled)
+        app.buttons["refresh62-first"].tap()
+        scrollWait(app.staticTexts["refresh62-count"], "label == '1:1'")
+        XCTAssertEqual(start.label, "開始辨識")
+        XCTAssertTrue(start.isEnabled && app.buttons["choosePhoto"].isEnabled)
+        XCTAssertTrue(json.isEnabled && share.isEnabled)
+        XCTAssertFalse(app.links["wikipedia-1"].exists)
+        json.tap()
+        // This injected provider returns a parsed result without raw response bytes.
+        // The real JSON sheet must open and disclose that absence, never invent JSON.
+        XCTAssertTrue(app.staticTexts["modelJSONMessage"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["modelJSONMessage"].label.contains("未保存原始 JSON"))
+        app.buttons["closeModelJSON"].tap()
+        XCTAssertEqual(app.staticTexts["refresh62-count"].label, "1:1")
+        app.buttons["refresh62-second"].tap()
+        XCTAssertTrue(app.links["wikipedia-1"].waitForExistence(timeout: 5))
+        XCTAssertEqual(start.label, "開始辨識")
+    }
     private func checkRefresh62(_ options: [String]) {
         let app = launch(["--refresh62-ui"] + options)
         let refresh = app.buttons["refreshRecognition-1"]
@@ -33,23 +181,52 @@ extension CaptureUITests {
             XCTAssertLessThan(timestamp.frame.maxY, refresh.frame.minY)
         }
         XCTAssertEqual(refresh.label, "重新辨識這張圖片")
+        XCTAssertFalse(app.staticTexts["archiveAttempt-1"].exists)
+        let originalTimestamp = timestamp.label
         refresh.tap()
         scrollWait(app.staticTexts["refresh62-count"], "label == '2:1'")
+        let attempt = app.staticTexts["archiveAttempt-1"]
+        XCTAssertTrue(attempt.waitForExistence(timeout: 5))
+        let secondAttempt = attempt.label
+        XCTAssertTrue(secondAttempt.hasPrefix("本圖第 2 次辨識・"), secondAttempt)
+        XCTAssertGreaterThan(secondAttempt.count, 18)
+        XCTAssertEqual(timestamp.label, originalTimestamp)
         XCTAssertFalse(refresh.isEnabled)
         XCTAssertFalse(app.buttons["continueCapture"].isEnabled)
+        XCTAssertEqual(app.buttons["continueCapture"].label, "辨識中")
+        XCTAssertEqual(app.staticTexts["refreshNotice-1"].label, "重新辨識中，暫時顯示上次辨識結果。")
         XCTAssertTrue(json.isEnabled && share.isEnabled)
         app.buttons["refresh62-first"].tap()
         scrollWait(app.staticTexts["refresh62-count"], "label == '2:2'")
+        XCTAssertEqual(attempt.label, secondAttempt)
         XCTAssertFalse(refresh.isEnabled)
         XCTAssertFalse(app.buttons["continueCapture"].isEnabled)
+        XCTAssertFalse(app.buttons["choosePhoto"].isEnabled)
+        XCTAssertEqual(app.buttons["continueCapture"].label, "開始辨識")
         XCTAssertTrue(json.isEnabled && share.isEnabled)
+        XCTAssertFalse(app.links["wikipedia-1"].exists)
+        let firstFinished = XCTAttachment(screenshot: app.screenshot())
+        firstFinished.name = "refresh63-first-ready-second-pending-\(options.isEmpty ? "normal" : "large")"
+        firstFinished.lifetime = .keepAlways; add(firstFinished)
+        json.tap()
+        // This injected provider returns a parsed result without raw response bytes.
+        // The real JSON sheet must open and disclose that absence, never invent JSON.
+        XCTAssertTrue(app.staticTexts["modelJSONMessage"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["modelJSONMessage"].label.contains("未保存原始 JSON"))
+        app.buttons["closeModelJSON"].tap()
+        XCTAssertEqual(app.staticTexts["refresh62-count"].label, "2:2")
+        XCTAssertEqual(app.buttons["continueCapture"].label, "開始辨識")
         app.buttons["refresh62-second"].tap()
         scrollWait(app.staticTexts["refresh62-busy"], "label == 'idle'")
+        XCTAssertEqual(attempt.label, secondAttempt)
         XCTAssertTrue(refresh.isEnabled)
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "refresh62-completed-\(options.isEmpty ? "normal" : "large")"; shot.lifetime = .keepAlways; add(shot)
         refresh.tap(); scrollWait(app.staticTexts["refresh62-count"], "label == '3:2'")
         app.buttons["refresh62-fail"].tap(); scrollWait(app.staticTexts["refresh62-busy"], "label == 'idle'")
+        let failedAttempt = attempt.label
+        XCTAssertTrue(failedAttempt.hasPrefix("本圖第 3 次辨識・"), failedAttempt)
+        XCTAssertEqual(timestamp.label, originalTimestamp)
         XCTAssertTrue(app.staticTexts["refreshNotice-1"].label.contains("保留上次成功結果"))
         XCTAssertTrue(app.links["wikipedia-1"].exists && json.isEnabled && share.isEnabled && refresh.isEnabled)
         json.tap()
@@ -58,6 +235,33 @@ extension CaptureUITests {
         app.buttons["modelJSONStage-2"].tap()
         XCTAssertTrue((app.textViews["modelJSONText"].value as? String ?? "").contains("曙光"))
         app.buttons["closeModelJSON"].tap()
+        app.terminate()
+        app.launchArguments.append("--refresh63-preserve")
+        app.launch()
+        let reopened = app.staticTexts["archiveAttempt-1"]
+        XCTAssertTrue(reopened.waitForExistence(timeout: 15))
+        XCTAssertEqual(reopened.label, failedAttempt)
+        XCTAssertEqual(app.staticTexts["archiveTimestamp-1"].label, originalTimestamp)
+        XCTAssertEqual(app.staticTexts["refresh62-count"].label, "0:0")
+        for _ in 0..<4 {
+            if reopened.isHittable { break }
+            app.collectionViews.firstMatch.swipeUp()
+        }
+        XCTAssertTrue(reopened.isHittable)
+        XCTAssertGreaterThan(reopened.frame.height, 0)
+        XCTAssertGreaterThanOrEqual(reopened.frame.minX, app.frame.minX)
+        XCTAssertLessThanOrEqual(reopened.frame.maxX, app.frame.maxX)
+        let restored = XCTAttachment(screenshot: app.screenshot())
+        restored.name = "attempt63-failed-reopened-\(options.isEmpty ? "normal" : "large")"
+        restored.lifetime = .keepAlways; add(restored)
+    }
+    func testAttempt63LegacyMissingDateDoesNotInventTimestamp() {
+        let app = launch(["--refresh62-ui", "--attempt63-legacy"])
+        let attempt = app.staticTexts["archiveAttempt-1"]
+        XCTAssertTrue(attempt.waitForExistence(timeout: 15))
+        XCTAssertEqual(attempt.label, "本圖第 2 次辨識")
+        XCTAssertTrue(app.staticTexts["archiveTimestamp-1"].exists)
+        XCTAssertTrue(app.staticTexts["refreshNotice-1"].label.contains("保留上次成功結果"))
     }
     func testRefresh62MissingImageDisablesActionWithReason() {
         let app = launch(["--refresh62-ui", "--refresh62-missing"])
@@ -168,7 +372,7 @@ extension CaptureUITests {
         let version = app.staticTexts["modelJSONVersion"]
         details.swipeUp()
         XCTAssertTrue(version.isHittable)
-        XCTAssertTrue(version.label.contains("P19-English-entity-contract-zhTW1"))
+        XCTAssertTrue(version.label.contains("P21-English-semantic-entities-zhTW1"))
         text.swipeUp(); attach37(app, "json45-maximum-type-dark")
         app.buttons["shareRecognitionJSON"].tap()
         let copy = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Copy'")).firstMatch
@@ -569,6 +773,93 @@ extension CaptureUITests {
         shareCard(12, in: app, rich: true)
         app.terminate(); app.launchArguments = ["--text-wiki-links", "--resume-history", "--expect-share-11"]; app.launch(); ready(app)
         shareCard(11, in: app, rich: true)
+    }
+    func testExplicitBarcodeURLsPreserveHTTPAndLeaveOtherPayloadsPlain() throws {
+        let app = launch(["--web-url-links"]); ready(app)
+        XCTAssertEqual(try capturedURLs(app), [])
+        let expected = ["http://60.251.161.196/RegDegree/RegisterDegree.aspx", "https://example.com/path?x=1&y=2#part"]
+        for (index, url) in expected.enumerated() {
+            let link = app.descendants(matching: .any).matching(identifier: "archiveBarcode-12-\(index)").firstMatch
+            reveal(link, in: app)
+            XCTAssertEqual(link.label, url)
+            XCTAssertGreaterThanOrEqual(link.frame.height, 44)
+            link.tap()
+            XCTAssertEqual(try capturedURLs(app), Array(expected.prefix(index + 1)))
+        }
+        for index in 2...5 {
+            XCTAssertFalse(app.links["archiveBarcode-12-\(index)"].exists)
+            XCTAssertTrue(app.staticTexts["archiveBarcode-12-\(index)"].exists)
+        }
+        attach37(app, "explicit-web-barcodes")
+        let first = app.descendants(matching: .any).matching(identifier: "archiveBarcode-12-0").firstMatch
+        reveal(first, in: app); first.press(forDuration: 1)
+        let copy = app.buttons["複製網址"]
+        XCTAssertTrue(copy.waitForExistence(timeout: 5)); copy.tap()
+        app.buttons["verifyWebCopy"].tap()
+        XCTAssertEqual(app.staticTexts["c2-fixture-status"].label, "web-copy-correct")
+        shareCard(12, in: app)
+        XCTAssertEqual(try capturedURLs(app), expected)
+    }
+    func testResultAndJSONURLsOpenOnlyExplicitLinks() throws {
+        let app = launch(["--web-url-links"]); ready(app)
+        XCTAssertEqual(try capturedURLs(app), [])
+        let text = app.textViews["archiveText-12"]
+        for url in ["https://name.example/a", "https://summary.example/a"] {
+            let link = text.links[url]; reveal(link, in: app); link.tap()
+            waitForOpenedWebURL(url, app: app)
+            XCTAssertEqual(try capturedURLs(app).last, url)
+        }
+        let disclosure = text.links["原文"]; reveal(disclosure, in: app); disclosure.tap()
+        scrollWait(text, "value CONTAINS 'https://original.example/a'")
+        let original = text.links["https://original.example/a"]; reveal(original, in: app); original.tap()
+        waitForOpenedWebURL("https://original.example/a", app: app)
+        XCTAssertEqual(try capturedURLs(app).count, 3)
+        XCTAssertEqual(try capturedURLs(app).last, "https://original.example/a")
+        XCTAssertFalse(text.links["example.com"].exists)
+        XCTAssertFalse(text.links["0800-388-100"].exists)
+        let json = app.buttons["modelJSON-12"]; reveal(json, in: app); json.tap()
+        let raw = app.textViews["modelJSONText"]
+        XCTAssertTrue(raw.waitForExistence(timeout: 5))
+        let before = raw.value as? String
+        raw.links["https://json.example/a"].tap()
+        XCTAssertEqual(raw.value as? String, before)
+        XCTAssertTrue((before ?? "").contains("0012345678905"))
+        attach37(app, "explicit-web-json")
+        app.buttons["closeModelJSON"].tap()
+        waitForOpenedWebURL("https://json.example/a", app: app)
+        XCTAssertEqual(try capturedURLs(app).last, "https://json.example/a")
+        XCTAssertEqual(try capturedURLs(app).count, 4)
+    }
+    func testBarcodeURLFullHostAtMaximumTypeInDarkMode() throws {
+        let app = launch(["--web-url-links", "--maximum-type", "--dark"]); ready(app)
+        let link = app.descendants(matching: .any).matching(identifier: "archiveBarcode-12-0").firstMatch; reveal(link, in: app)
+        XCTAssertEqual(link.label, "http://60.251.161.196/RegDegree/RegisterDegree.aspx")
+        XCTAssertGreaterThanOrEqual(link.frame.height, 44)
+        XCTAssertLessThanOrEqual(link.frame.maxX, app.frame.maxX)
+        XCTAssertGreaterThanOrEqual(link.frame.minX, app.frame.minX)
+        XCTAssertEqual(try capturedURLs(app), [])
+        attach37(app, "explicit-web-maximum-type-dark")
+        link.tap()
+        XCTAssertEqual(try capturedURLs(app), [link.label])
+    }
+    func testLegacyResultURLsUseSameExplicitWebRule() throws {
+        let app = launch(["--web-url-links", "--legacy-web-result"]); ready(app)
+        XCTAssertEqual(try capturedURLs(app), [])
+        for url in ["https://name.example/a", "https://summary.example/a", "https://original.example/a"] {
+            let link = app.links[url]
+            XCTAssertTrue(link.waitForExistence(timeout: 5)); link.tap()
+            XCTAssertEqual(try capturedURLs(app).last, url)
+        }
+        XCTAssertEqual(try capturedURLs(app).count, 3)
+        XCTAssertFalse(app.links["0012345678905"].exists)
+        attach37(app, "explicit-web-legacy-result")
+    }
+    private func waitForOpenedWebURL(_ url: String, app: XCUIApplication) {
+        // UITextView primary actions finish asynchronously after the tap gesture.
+        let arrived = XCTNSPredicateExpectation(predicate: NSPredicate { [self] _, _ in
+            (try? capturedURLs(app).last) == url
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [arrived], timeout: 5), .completed)
     }
     private func capturedURLs(_ app: XCUIApplication) throws -> [String] {
         let value = try XCTUnwrap(app.staticTexts["c2-fixture-status"].value as? String)
@@ -1378,15 +1669,20 @@ extension CaptureUITests {
         XCTAssertEqual(XCTWaiter.wait(for: [done], timeout: 45), .completed)
         XCTAssertEqual(result.label, "passed 11", result.label)
     }
-    func testBarcodeOnlyGoogleWithoutRecognizedText() {
+    func testBarcodeOnlyGoogleWithoutRecognizedText() throws {
         let app = launch(["--barcode-only"]); ready(app)
         let link = app.descendants(matching: .any).matching(identifier: "googleSearch-12").firstMatch
         reveal(link, in: app)
         XCTAssertEqual(link.label, "Google 搜尋：3017620422003")
         link.tap(); XCTAssertEqual(app.staticTexts["c2-fixture-status"].label, "search-correct-12-calls-0")
-        shareCard(12, in: app)
+        try assertGoogleURLWithoutLanguageFilter("3017620422003", in: app)
+        // No first-stage answer: the existing whole-card share gate remains closed.
+        let share = app.otherElements["archiveCard-12"].buttons["shareRecognitionResult"]
+        XCTAssertTrue(share.exists)
+        XCTAssertFalse(share.isEnabled)
+        XCTAssertEqual(share.label, "完成辨識後可分享")
     }
-    func testLegacyProductCardShowsOnlyGoogleAndWikiAfterReopen() {
+    func testLegacyProductCardShowsOnlyGoogleAndWikiAfterReopen() throws {
         let app = launch(["--product-links"]); ready(app)
         let query = "雨傘 3017620422003"
         let first = app.descendants(matching: .any).matching(identifier: "googleSearch-12").firstMatch
@@ -1395,6 +1691,7 @@ extension CaptureUITests {
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "productFacts-12").firstMatch.exists)
         XCTAssertFalse(app.links["內容：DbCL"].exists)
         first.tap(); XCTAssertEqual(app.staticTexts["c2-fixture-status"].label, "search-correct-12-calls-0")
+        try assertGoogleURLWithoutLanguageFilter(query, in: app)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Google-barcode-no-OFF"; shot.lifetime = .keepAlways; add(shot)
         shareCard(12, in: app)
         app.terminate(); app.launchArguments = ["--product-links", "--expect-share-11", "--resume-history"]; app.launch(); ready(app)
@@ -1402,6 +1699,7 @@ extension CaptureUITests {
         reveal(second, in: app)
         XCTAssertEqual(second.label, "Google 搜尋：剪刀 5901234123457")
         second.tap(); XCTAssertEqual(app.staticTexts["c2-fixture-status"].label, "search-correct-11-calls-0")
+        try assertGoogleURLWithoutLanguageFilter("剪刀 5901234123457", in: app)
         shareCard(11, in: app)
     }
     func testWikipediaLinksUseCanonicalURLOfSelectedPersistedCard() {
@@ -1469,7 +1767,7 @@ extension CaptureUITests {
         app.terminate(); app.launchArguments = ["--resume-history"]; app.launch(); ready(app)
         XCTAssertEqual(app.staticTexts["archiveTimestamp-12"].label, before)
     }
-    func testGoogleSearchOpensOnlySelectedCardAfterTapAndRestart() {
+    func testGoogleSearchOpensOnlySelectedCardAfterTapAndRestart() throws {
         let app = launch(["--search-links"]); ready(app)
         XCTAssertEqual(app.staticTexts["c2-fixture-status"].label, "ready-12")
         let first = app.descendants(matching: .any).matching(identifier: "googleSearch-12").firstMatch
@@ -1479,6 +1777,7 @@ extension CaptureUITests {
         reveal(first, in: app)
         first.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
         XCTAssertEqual(app.staticTexts["c2-fixture-status"].label, "search-correct-12-calls-0")
+        try assertGoogleURLWithoutLanguageFilter("Acme C++ & 測試 #12", in: app)
         app.terminate(); app.launchArguments = ["--resume-history", "--search-links"]; app.launch(); ready(app)
         let list = historyList(in: app)
         let second = app.descendants(matching: .any).matching(identifier: "googleSearch-11").firstMatch
@@ -1487,6 +1786,7 @@ extension CaptureUITests {
         XCTAssertEqual(second.label, "Google 搜尋：Acme C++ & 測試 #11")
         second.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
         XCTAssertEqual(app.staticTexts["c2-fixture-status"].label, "search-correct-11-calls-0")
+        try assertGoogleURLWithoutLanguageFilter("Acme C++ & 測試 #11", in: app)
     }
     func testFallbackNameAndQRLinksShareAfterRestartWithoutAIReplay() {
         let app = launch(["--fallback-links"]); ready(app)
@@ -1550,6 +1850,21 @@ extension CaptureUITests {
         let app = launch(["--share-links", "--expect-share-11"]); ready(app)
         app.terminate(); app.launchArguments = ["--share-links", "--expect-share-11", "--resume-history"]; app.launch(); ready(app)
         shareCard(11, in: app)
+    }
+    private func assertGoogleURLWithoutLanguageFilter(_ query: String, in app: XCUIApplication) throws {
+        let opened = try capturedURLs(app)
+        XCTAssertEqual(opened.count, 1)
+        let raw = try XCTUnwrap(opened.first)
+        let url = try XCTUnwrap(URLComponents(string: raw))
+        XCTAssertEqual(url.scheme, "https")
+        XCTAssertEqual(url.host, "www.google.com")
+        XCTAssertEqual(url.path, "/search")
+        XCTAssertEqual(url.queryItems, [.init(name: "q", value: query), .init(name: "gl", value: "tw")])
+        XCTAssertNil(url.fragment)
+        XCTAssertFalse(raw.contains("+"))
+        let evidence = XCTAttachment(string: raw)
+        evidence.name = "google-without-language-filter-opened-url"
+        evidence.lifetime = .keepAlways; add(evidence)
     }
     func testGoogleOnlyShareKeepsImageAndNoWiki() {
         let app = launch(["--search-links"]); ready(app)
@@ -1777,7 +2092,7 @@ extension CaptureUITests {
 }
 
 extension CaptureUITests {
-    func testControlledAccountRecoveryWithSyntheticTransport() {
+    func testPaid70LoginLifecycleWithSyntheticTransport() {
         let app = launch(["--auth-recovery-checks", "--siwc-auth-fixture"])
         let result = app.staticTexts["auth-recovery-result"]
         XCTAssertTrue(result.waitForExistence(timeout: 10))
@@ -1785,52 +2100,7 @@ extension CaptureUITests {
         XCTAssertEqual(XCTWaiter.wait(for: [done], timeout: 45), .completed)
         XCTAssertTrue(result.label.hasPrefix("passed "), result.label)
     }
-    func testAccountRecoveryRequiresConfirmationAndStopsAfterOneAttempt() { checkRecoveryConfirmation([]) }
-    func testAccountRecoveryConfirmationAtMaximumType() { checkRecoveryConfirmation(["--maximum-type"]) }
-    private func checkRecoveryConfirmation(_ args: [String]) {
-        let app = launch(["--auth-recovery-ui", "--siwc-auth-fixture"] + args)
-        let retry = app.buttons["siwc-retry-registration"]
-        XCTAssertTrue(retry.waitForExistence(timeout: 15))
-        for _ in 0..<8 where !retry.isHittable { app.swipeUp() }
-        XCTAssertTrue(retry.isHittable); retry.tap()
-        let confirm = app.buttons["是，同一帳戶與工作區"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
-        if app.otherElements["PopoverDismissRegion"].exists {
-            app.otherElements["PopoverDismissRegion"].coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.5)).tap()
-        } else {
-            let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["取消", "Cancel"])).firstMatch
-            XCTAssertTrue(cancel.exists); cancel.tap()
-        }
-        XCTAssertFalse(confirm.exists)
-        XCTAssertTrue(retry.exists)
-        for _ in 0..<8 where !retry.isHittable { app.swipeDown() }
-        retry.tap(); XCTAssertTrue(confirm.waitForExistence(timeout: 5)); confirm.tap()
-        let consumed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: retry)
-        XCTAssertEqual(XCTWaiter.wait(for: [consumed], timeout: 10), .completed)
-        let change = app.buttons["siwc-authenticate-account"]
-        let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: change)
-        XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 10), .completed)
-        XCTAssertEqual(change.label, "更換帳戶")
-        let status = app.staticTexts["recoveryStatus"]
-        for _ in 0..<10 where !status.isHittable { app.swipeUp() }
-        XCTAssertTrue(status.label.contains("HTTP 503")); XCTAssertTrue(status.label.contains("原帳戶已保留"))
-        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Account-recovery-" + (args.isEmpty ? "normal" : "maximum")
-        shot.lifetime = .keepAlways; add(shot)
-    }
-    func testSIWCD2CatalogAndSingleImageWithSyntheticTransport() { checkD2([]) }
-    func testSIWCD2DiagnosticsMaximumText() { checkD2(["--maximum-type"]) }
-    private func checkD2(_ args: [String]) {
-        let app = launch(["--siwc-d2-checks", "--siwc-auth-fixture"] + args)
-        let result = app.staticTexts["siwc-d2-result"]
-        XCTAssertTrue(result.waitForExistence(timeout: 10))
-        let done = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH 'passed ' OR label BEGINSWITH 'FAILED '"), object: result)
-        XCTAssertEqual(XCTWaiter.wait(for: [done], timeout: 30), .completed)
-        XCTAssertEqual(result.label, "passed 16")
-        XCTAssertTrue(app.staticTexts["authDiagnosticRevision"].label.contains("D2"))
-        app.swipeUp(); app.swipeUp()
-        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "SIWC-D2-" + (args.isEmpty ? "normal" : "maximum")
-        shot.lifetime = .keepAlways; add(shot)
-    }
+
 }
 
 extension CaptureUITests {
@@ -1841,20 +2111,6 @@ extension CaptureUITests {
         let done = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH 'passed ' OR label BEGINSWITH 'FAILED '"), object: result)
         XCTAssertEqual(XCTWaiter.wait(for: [done], timeout: 30), .completed)
         XCTAssertEqual(result.label, "passed 8")
-    }
-    func testSafeDescriptionIsReadableWithoutRawSensitiveText() {
-        let app = launch(["--failed-signin-settings", "--siwc-auth-fixture"]); ready(app)
-        app.buttons["設定"].tap()
-        let disclosure = app.buttons["安全診斷與帳戶驗證"]
-        for _ in 0..<8 where !disclosure.isHittable { app.swipeUp() }
-        XCTAssertTrue(disclosure.isHittable); disclosure.tap()
-        let description = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "已提供但抑制保存")).firstMatch
-        for _ in 0..<12 where !description.isHittable { app.swipeUp() }
-        XCTAssertTrue(description.isHittable)
-        XCTAssertTrue(description.label.contains("含可能敏感內容"))
-        XCTAssertFalse(app.debugDescription.contains("generated token=never-store"))
-        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Safe-error-description-suppressed"
-        shot.lifetime = .keepAlways; add(shot)
     }
     func testOrdinarySettingsShowsFailedReplacement() { checkOrdinaryFailure([]) }
     func testOrdinarySettingsFailureAtMaximumType() { checkOrdinaryFailure(["--maximum-type"]) }
@@ -1890,27 +2146,20 @@ extension CaptureUITests {
         let app = launch(["--failed-signin-settings", "--siwc-auth-fixture"] + args); ready(app)
         app.buttons["設定"].tap()
         assertCompactAccount(app, suffix: "failed-" + args.joined(separator: "-"))
-        let result = app.staticTexts["siwcRecentSignIn"]
-        for _ in 0..<8 where !result.isHittable { app.swipeUp() }
-        XCTAssertTrue(result.isHittable); XCTAssertTrue(result.label.contains("失敗"))
+        let requirement = app.staticTexts["siwcPaidRequirement"]
+        for _ in 0..<8 where !requirement.isHittable { app.swipeUp() }
+        XCTAssertTrue(requirement.isHittable)
+        XCTAssertTrue(requirement.label.contains("免費帳戶無法使用辨識功能"))
         let status = app.staticTexts["siwcStatus"]
         for _ in 0..<8 where !status.isHittable { app.swipeUp() }
-        let recent = XCTAttachment(screenshot: app.screenshot()); recent.name = "Ordinary-recent-signin-result-" + (args.isEmpty ? "normal" : "maximum")
-        recent.lifetime = .keepAlways; add(recent)
+        XCTAssertTrue(status.isHittable)
         XCTAssertTrue(status.label.contains("HTTP 400")); XCTAssertTrue(status.label.contains("原帳戶已保留"))
-        let disclosure = app.buttons["安全診斷與帳戶驗證"]
-        for _ in 0..<8 where !disclosure.isHittable { app.swipeUp() }
-        XCTAssertTrue(disclosure.isHittable); disclosure.tap()
-        let models = app.buttons["siwcReadModels"]
-        for _ in 0..<10 where !models.isHittable { app.swipeUp() }
-        if !models.exists {
-            let snapshot = XCTAttachment(screenshot: app.screenshot()); snapshot.name = "Missing-diagnostic-actions"; snapshot.lifetime = .keepAlways; add(snapshot)
-            let tree = XCTAttachment(string: app.debugDescription); tree.name = "Diagnostic-accessibility-tree"; tree.lifetime = .keepAlways; add(tree)
-        }
-        XCTAssertTrue(models.exists); XCTAssertFalse(models.isEnabled)
-        let image = app.buttons["siwcTestSyntheticImage"]
-        for _ in 0..<10 where !image.isHittable { app.swipeUp() }
-        XCTAssertTrue(image.exists); XCTAssertFalse(image.isEnabled)
+        XCTAssertTrue(status.label.contains("使用要求：")); XCTAssertTrue(status.label.contains("確認目前登入的帳戶"))
+        XCTAssertFalse(app.buttons["安全診斷與帳戶驗證"].exists)
+        XCTAssertFalse(app.buttons["siwcReadModels"].exists)
+        XCTAssertFalse(app.buttons["siwcTestSyntheticImage"].exists)
+        XCTAssertFalse(app.buttons["siwc-retry-registration"].exists)
+        XCTAssertFalse(app.debugDescription.contains("generated token=never-store"))
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Ordinary-settings-failed-signin-" + (args.isEmpty ? "normal" : "maximum")
         shot.lifetime = .keepAlways; add(shot)
     }
@@ -2291,6 +2540,23 @@ extension CaptureUITests {
         XCTAssertTrue((app.textViews["archiveText-1"].value as? String ?? "").contains("摩訶止觀"))
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "identity57-book-author-page"; shot.lifetime = .keepAlways; add(shot)
     }
+    func testOriginalWiki67JapaneseLabelAndChineseSummarySurviveReload() {
+        let app = launch(["--semantic45-ui", "--foreign67"])
+        XCTAssertTrue(app.buttons["semantic45-start"].waitForExistence(timeout: 10))
+        scrollWait(app.buttons["semantic45-start"], "enabled == true")
+        app.buttons["semantic45-start"].tap()
+        XCTAssertTrue(app.textViews["archiveText-1"].waitForExistence(timeout: 10))
+        app.buttons["semantic45-finish"].tap()
+        let link = app.links["wikipedia-1"]
+        XCTAssertTrue(link.waitForExistence(timeout: 10))
+        XCTAssertEqual(link.label, "維基百科：アサヒビール（日文）（品牌）")
+        XCTAssertTrue((app.textViews["archiveText-1"].value as? String ?? "").contains("繁體中文品牌說明"))
+        app.buttons["title61-reload"].tap()
+        let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "title61-reloaded"), object: app.staticTexts["semantic54-copy-status"])
+        XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 10), .completed)
+        XCTAssertEqual(app.links["wikipedia-1"].label, "維基百科：アサヒビール（日文）（品牌）")
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "original67-japanese-wiki-reloaded"; shot.lifetime = .keepAlways; add(shot)
+    }
     func testTitle61TraditionalWikiLabelBeforeAndAfterArchiveReload() {
         let app = launch(["--semantic45-ui", "--title61"])
         XCTAssertTrue(app.buttons["semantic45-start"].waitForExistence(timeout: 10))
@@ -2309,13 +2575,64 @@ extension CaptureUITests {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "title61-traditional-wiki-reloaded"; shot.lifetime = .keepAlways; add(shot)
     }
+    func testOriginalWiki67JSONShareCopiesOriginalSourceAndLanguage() {
+        checkRequest54CombinedShareFromEachPage(["--foreign67"])
+    }
+    func testSummary69ChineseQuotedOCRVisibleBeforeReview() {
+        let app = launch(["--semantic45-ui", "--foreign67", "--quoted69"])
+        let start = app.buttons["semantic45-start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10)); scrollWait(start, "enabled == true"); start.tap()
+        let body = app.textViews["archiveText-1"]
+        XCTAssertTrue(body.waitForExistence(timeout: 10))
+        let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "罐身可見的「まろやかな泡」意為口感柔和的泡沫。"), object: body)
+        XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 10), .completed)
+        XCTAssertFalse((body.value as? String ?? "").contains("尚未取得"))
+    }
+    func testSummary69JSONCopyRetainsOriginalForeignResponse() {
+        checkRequest54CombinedShareFromEachPage(["--foreign67", "--summary68"])
+    }
+    func testSummary69ChineseWithUnlistedKatakanaRemainsOriginal() {
+        let app = launch(["--semantic45-ui", "--foreign67", "--native68"])
+        let start = app.buttons["semantic45-start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10)); scrollWait(start, "enabled == true"); start.tap()
+        let body = app.textViews["archiveText-1"]
+        XCTAssertTrue(body.waitForExistence(timeout: 10)); app.buttons["semantic45-finish"].tap()
+        let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "該品牌推出スーパードライ系列，這是一句繁體中文介紹。"), object: body)
+        XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 10), .completed)
+        XCTAssertFalse((body.value as? String ?? "").contains("並非百科補充"))
+        XCTAssertEqual(app.links["wikipedia-1"].label, "維基百科：アサヒビール（日文）（品牌）")
+    }
+    func testSummary69ForeignReplyAndOriginalLinkSurviveReload() {
+        let app = launch(["--semantic45-ui", "--foreign67", "--summary68"])
+        let start = app.buttons["semantic45-start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10)); scrollWait(start, "enabled == true"); start.tap()
+        let body = app.textViews["archiveText-1"]
+        XCTAssertTrue(body.waitForExistence(timeout: 10))
+        XCTAssertTrue((body.value as? String ?? "").contains("アサヒ生ビール マルエフ是一款日本啤酒，Asahi"))
+        app.buttons["semantic45-finish"].tap()
+        let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "のブランドのビールです"), object: body)
+        XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 10), .completed)
+        XCTAssertTrue((body.value as? String ?? "").contains("のブランドのビールです"))
+        XCTAssertEqual(app.links["wikipedia-1"].label, "維基百科：アサヒビール（日文）（品牌）")
+        app.buttons["title61-reload"].tap()
+        let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "title61-reloaded"), object: app.staticTexts["semantic54-copy-status"])
+        XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 10), .completed)
+        XCTAssertFalse((body.value as? String ?? "").contains("並非百科補充"))
+        XCTAssertTrue((body.value as? String ?? "").contains("のブランドのビールです"))
+        XCTAssertEqual(app.links["wikipedia-1"].label, "維基百科：アサヒビール（日文）（品牌）")
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "summary69-verbatim-japanese-reloaded"; shot.lifetime = .keepAlways; add(shot)
+    }
     func testRequest54CombinedShareFromEachPage() {
-        let app = launch(["--semantic45-ui"])
+        checkRequest54CombinedShareFromEachPage([])
+    }
+    private func checkRequest54CombinedShareFromEachPage(_ arguments: [String]) {
+        let app = launch(["--semantic45-ui"] + arguments)
         XCTAssertTrue(app.buttons["semantic45-start"].waitForExistence(timeout: 10))
         app.buttons["semantic45-start"].tap()
         XCTAssertTrue(app.textViews["archiveText-1"].waitForExistence(timeout: 10))
         app.buttons["semantic45-finish"].tap()
-        let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS '曙光公司持有這個品牌'"), object: app.textViews["archiveText-1"])
+        let phrase = arguments.contains("--summary68") ? "のブランドのビールです" : arguments.contains("--foreign67") ? "繁體中文品牌說明" : "曙光公司持有這個品牌"
+        let updated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", phrase), object: app.textViews["archiveText-1"])
         XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 8), .completed)
         for (index, stage) in [1, 3, 2].enumerated() {
             app.buttons["modelJSON-1"].tap()

@@ -15,7 +15,7 @@ private func fallbackCard(_ result: RecognitionResult? = nil, qr: [String] = [],
     #expect(query.query == productName && card.result == result && result.searchQuery == nil)
     #expect(card.shareDocument().links.map(\.url) == [query.googleURL!])
     #expect(card.shareText().contains("Google 搜尋：" + productName))
-    #expect(URLComponents(url: query.googleURL!, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: productName), .init(name: "gl", value: "tw"), .init(name: "lr", value: "lang_zh-TW")])
+    #expect(URLComponents(url: query.googleURL!, resolvingAgainstBaseURL: false)?.queryItems == [.init(name: "q", value: productName), .init(name: "gl", value: "tw")])
     #expect(result.wikipediaTopics == nil && !card.shareText().contains("維基百科"))
 }
 

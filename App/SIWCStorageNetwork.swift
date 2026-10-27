@@ -29,11 +29,6 @@ struct SIWCPendingRegistration: Codable, Identifiable, Sendable, Equatable {
     let savedAt: Date
     var retry: SIWCRegistrationRetry? = nil // Legacy pending records have no retry permit.
 }
-enum SIWCSignInChoice: Equatable {
-    case newAccount
-    case account(String)
-    case pending(String)
-}
 struct SIWCSaved: Codable {
     var hostID: String
     var accounts: [SIWCAccount]

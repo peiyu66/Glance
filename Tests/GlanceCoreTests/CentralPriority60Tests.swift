@@ -55,14 +55,15 @@ private actor Network60 {
 @Test func central60ExactPageLastInSearchIsReservedBeforeAuthor() async throws {
     let network = try Network60(exact: response60([]), searches: ["中央書名": response60([page60(1,"作者甲",index:1),page60(2,"其他主題",index:2),page60(90,"中央書名",index:3)]), "作者甲": response60([page60(3,"第三相關頁",index:1)])])
     let sources = try await WikipediaReviewCollector(transport: { try await network.fetch($0) }).collect(for: subject60())
-    #expect(sources.map(\.pageID) == [90,1,3])
+    #expect(sources.map(\.pageID) == [90,3,1,2]) // central first, then a different entity before a second central-batch hit
 }
 @Test func central60AliasConversionAndRedirectUseCanonicalTitleAndDeduplicate() async throws {
     let network = try Network60(exact: response60([page60(90,"正式書名"),page60(90,"正式書名")], maps:["converted":[["from":"中央書名","to":"中央书名"]],"redirects":[["from":"中央书名","to":"正式書名"],["from":"另一別名","to":"正式書名"]]]))
     let sources = try await WikipediaReviewCollector(transport: { try await network.fetch($0) }).collect(for: subject60(["中央书名","另一別名"], related: false))
     #expect(sources.count == 1 && sources.first?.title == "正式書名" && sources.first?.pageID == 90)
     #expect(await network.calls.first?["titles"] == "中央書名|另一別名")
-    #expect(await network.calls.count == 2)
+    #expect(await network.calls.count == 3) // redirect remains eligible for one complete-name search
+    #expect(await network.calls.compactMap { $0["gsrsearch"] } == ["中央書名"])
 }
 @Test func central60HomonymDoesNotProduceAutomaticIdentityOrOverwriteFirstCard() async throws {
     let network = try Network60(exact: response60([page60(90,"中央書名",text:"中央書名是合成遊戲，與相同名稱的書籍不同。")]))
@@ -91,11 +92,11 @@ private actor Network60 {
     let network = try Network60(exact: response60([disambiguation,page60(99,"無關標題")]))
     #expect(try await WikipediaReviewCollector(transport: { try await network.fetch($0) }).collect(for: subject60(related:false)).isEmpty)
 }
-@Test func central60BoundsThreeExactNamesAndUnchangedInputBudget() async throws {
+@Test func central60BoundsOneAliasPerEntityAndUnchangedInputBudget() async throws {
     let network = try Network60(exact: response60([page60(90,"中央書名",text:String(repeating:"有界合成來源。",count:1000))]))
     let result = subject60(["別名甲","別名乙","別名丙"],related:false)
     let sources = try await WikipediaReviewCollector(transport: { try await network.fetch($0) }).collect(for: result)
-    #expect(await network.calls.first?["titles"] == "中央書名|別名甲|別名乙")
+    #expect(await network.calls.first?["titles"] == "中央書名|別名甲")
     let input = try WikipediaSemanticReview.input(result:result,rawStageOne:nil,sources:sources)
     #expect(input.count <= 128000 && sources.count <= 3)
     #expect(sources.flatMap(\.excerpts).reduce(0) { $0 + $1.text.unicodeScalars.count } <= 3600)
@@ -112,7 +113,7 @@ private actor Network60 {
     #expect(WikipediaReviewCollector.queries(for:result) == ["台北社子"])
     #expect(sources.map(\.pageID) == [269800])
     let calls = await network.calls
-    #expect(calls.count == 2 && calls.allSatisfy { $0["titles"] == nil })
+    #expect(calls.count == 3 && calls.compactMap { $0["titles"] } == ["台北社子"])
     #expect(calls.compactMap { $0["gsrsearch"] } == ["台北社子"])
     #expect(GoogleSearchQuery.resolve(result:result,decodedBarcodes:[],productBarcodes:[])?.query == "台北社子")
 }

@@ -31,7 +31,13 @@ import UniformTypeIdentifiers
     }
     static let quote = "曙光公司持有曙光品牌，旋脆片是該品牌的零食系列。"
     static let title61Quote = "乐事是这个合成回归样本中的品牌名称。"
+    // Quote only the contiguous first sentence retained by the production excerpt budget.
+    static let original67Quote = "アサヒビールは日本のビールメーカーである。"
+    static let reported68 = "『アサヒ生ビール マルエフ』はアサヒビールのブランドのビールです。アサヒビールは日本の大手ビールメーカーで、主力商品『アサヒスーパードライ』などを展開しています。"
     static var source: WikipediaReviewSource {
+        if ProcessInfo.processInfo.arguments.contains("--foreign67") {
+            return .init(pageID: 67, title: "アサヒビール", url: URL(string: "https://ja.wikipedia.org/wiki/アサヒビール")!, fetchedAt: Date(), excerpts: [.init(id: "p0", text: original67Quote)])
+        }
         if ProcessInfo.processInfo.arguments.contains("--title61") {
             return .init(pageID: 6101, title: "乐事", url: URL(string: "https://zh.wikipedia.org/wiki/乐事")!, fetchedAt: Date(), excerpts: [.init(id: "p0", text: title61Quote)])
         }
@@ -41,6 +47,15 @@ import UniformTypeIdentifiers
         return .init(pageID: 4501, title: "曙光公司", url: URL(string: "https://zh.wikipedia.org/wiki/Aurora")!, fetchedAt: Date(), excerpts: [.init(id: "p0", text: quote)])
     }
     static var answer: WikipediaReviewAnswer {
+        if ProcessInfo.processInfo.arguments.contains("--foreign67") {
+            if ProcessInfo.processInfo.arguments.contains("--native68") {
+                return .init(decision: .selected, sourceID: "jawiki:67", relationship: .brand, searchName: "マルエフ", summary: "該品牌推出スーパードライ系列，這是一句繁體中文介紹。", citations: [.init(excerptID: "p0", quote: original67Quote)])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--summary68") {
+                return .init(decision: .selected, sourceID: "jawiki:67", relationship: .brand, searchName: "アサヒ生ビール マルエフ", summary: reported68, citations: [.init(excerptID: "p0", quote: original67Quote)])
+            }
+            return .init(decision: .selected, sourceID: "jawiki:67", relationship: .brand, searchName: "マルエフ", summary: "這是日文來源支援的合成繁體中文品牌說明。", citations: [.init(excerptID: "p0", quote: original67Quote)])
+        }
         if ProcessInfo.processInfo.arguments.contains("--title61") {
             return .init(decision: .selected, sourceID: "zhwiki:6101", relationship: .brand, searchName: "樂事洋芋片", summary: "這是使用樂事名稱的合成回歸樣本。", citations: [.init(excerptID: "p0", quote: title61Quote)])
         }
@@ -52,6 +67,17 @@ import UniformTypeIdentifiers
     // Synthetic book/author projection only; does not reproduce the complete user payload.
     static let book57Quote = "智者大師完成了「天台三大部」《法華文句》、《法華玄義》、《摩訶止觀》"
     static var result: RecognitionResult {
+        if ProcessInfo.processInfo.arguments.contains("--foreign67") {
+            if ProcessInfo.processInfo.arguments.contains("--quoted69") {
+                return .init(names: ["アサヒ生ビール マルエフ"], summary: "照片中央是印有「マルエフ」的日本啤酒罐。マルエフ是朝日啤酒的品牌名稱；罐身可見的「まろやかな泡」意為口感柔和的泡沫。", text: ["マルエフ", "まろやかな泡"], searchContractVersion: 17,
+                    searchEntities: [.init(kind: .product, name: "アサヒ生ビール マルエフ", sourceText: "マルエフ")])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--summary68") {
+                return .init(names: ["アサヒ生ビール マルエフ"], summary: "アサヒ生ビール マルエフ是一款日本啤酒，Asahi 是品牌原文名稱。", text: ["アサヒ生ビール マルエフ", "アサヒビール"], searchContractVersion: 17,
+                    searchEntities: [.init(kind: .product, name: "アサヒ生ビール マルエフ", sourceText: "アサヒ生ビール マルエフ"), .init(id: 1, role: .related, kind: .brand, name: "アサヒビール", aliases: ["Asahi"], sourceText: "アサヒビール", relation: .brand_of, relatedTo: 0)])
+            }
+            return .init(names: ["マルエフ"], summary: "初步簡介", text: ["マルエフ", "アサヒビール"], searchContractVersion: 17, searchEntities: [.init(kind: .product, name: "マルエフ", sourceText: "マルエフ")])
+        }
         if ProcessInfo.processInfo.arguments.contains("--title61") {
             return .init(names: ["樂事洋芋片"], summary: "第一階段簡介", text: ["乐事", "LAY'S"], searchContractVersion: 17, searchEntities: [.init(kind: .brand, name: "樂事", sourceText: "乐事")])
         }
@@ -157,7 +183,7 @@ extension C2FixtureHost {
             probe.finishSources(); await host.settle { !probe.waits.isEmpty }
             let reviewing = host.model.records.first!
             c["compact55_card_and_scroll_frozen_\(fail)"] = host.model.cardRecord(for: reviewing) == card && layoutChanges == 0 && host.model.isSupplementPending(for: reviewing)
-            c["compact55_live_request_not_hidden_\(fail)"] = reviewing.semanticRequestJSONDocument.rawText?.contains("\"input_version\":2") == true && reviewing.semanticReview?.sourcesFinishedAt != nil && reviewing.semanticReview?.requestDispatchStartedAt != nil
+            c["compact55_live_request_not_hidden_\(fail)"] = reviewing.semanticRequestJSONDocument.rawText?.contains("\"input_version\":3") == true && reviewing.semanticReview?.sourcesFinishedAt != nil && reviewing.semanticReview?.requestDispatchStartedAt != nil
             probe.finish(id, networkFailure: fail); await host.model.waitForWikipediaWork()
             let final = host.model.records.first!
             c["compact55_one_atomic_final_update_\(fail)"] = layoutChanges == (fail ? 0 : 1) && !host.model.isSupplementPending(for: final) && host.model.cardRecord(for: final) == final && final.id == id && final.result == initial.result
@@ -206,7 +232,7 @@ struct Semantic45View: View {
                     if ProcessInfo.processInfo.arguments.contains("--compact55-ui") {
                         Button("來源就緒") { probe.finishSources() }.accessibilityIdentifier("compact55-sources")
                     }
-                    if ProcessInfo.processInfo.arguments.contains("--title61") {
+                    if ProcessInfo.processInfo.arguments.contains("--title61") || ProcessInfo.processInfo.arguments.contains("--foreign67") {
                         Button("重讀紀錄") {
                             Task {
                                 host.model = host.makeModel(semantic: probe)
@@ -232,7 +258,9 @@ struct Semantic45View: View {
                     guard let record = host.model.records.first else { return }
                     let next = record.combinedJSONShareText
                     let allSections = next.contains("第一階段回覆") && next.contains("第二階段請求") && next.contains("第二階段回覆")
-                    presented = allSections && (expected.isEmpty || expected == next) && items.count == 1 && items.first as? String == next && copyItems.count == 1 && Set(copyItems[0].keys) == [UTType.utf8PlainText.identifier] && copyItems[0][UTType.utf8PlainText.identifier] as? String == next
+                    let rawSummaryBound = !ProcessInfo.processInfo.arguments.contains("--summary68") || next.contains(Semantic45Probe.reported68)
+                    let originalLanguageBound = rawSummaryBound && (!ProcessInfo.processInfo.arguments.contains("--foreign67") || (next.contains("jawiki:67") && next.contains("ja.wikipedia.org") && next.contains("\"language\":\"ja\"")))
+                    presented = allSections && originalLanguageBound && (expected.isEmpty || expected == next) && items.count == 1 && items.first as? String == next && copyItems.count == 1 && Set(copyItems[0].keys) == [UTType.utf8PlainText.identifier] && copyItems[0][UTType.utf8PlainText.identifier] as? String == next
                     expected = next
                 }
                 host.shareProbe.activityCompleted = { kind, completed in

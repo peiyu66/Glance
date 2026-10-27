@@ -20,12 +20,16 @@ private struct TextTrialFiles {
             var value = try JSONSerialization.jsonObject(with: raw) as! [String: Any]; value["max_output_tokens"] = TextTrialContract.maxOutputTokens
             value["text"] = ["format": WikipediaSemanticReview.legacyFormatW1]
             // The historical four-request trial pins input v1, independently of
-            // the current product's compact v2 request builder.
+            // the current product's v3 language-tagged request builder.
             var input = value["input"] as! [[String: Any]]
             input[0]["content"] = [["type": "input_text", "text": WikipediaSemanticReview.legacyPromptW1]]
             var content = input[1]["content"] as! [[String: String]]
             var payload = try JSONSerialization.jsonObject(with: Data(content[0]["text"]!.utf8)) as! [String: Any]
             payload["input_version"] = 1; payload["raw_stage_one_json"] = "{\"original\":\(id)}"
+            // Remove v3 source language metadata to reconstruct the immutable v1 trial contract.
+            payload["sources"] = (payload["sources"] as! [[String: Any]]).map { source in
+                var original = source; original.removeValue(forKey: "language"); return original
+            }
             var stage = payload["stage_one"] as! [String: Any]; stage.removeValue(forKey: "text_is_partial"); payload["stage_one"] = stage
             content[0]["text"] = String(decoding: try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]), as: UTF8.self)
             input[1]["content"] = content; value["input"] = input

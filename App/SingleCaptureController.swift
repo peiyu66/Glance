@@ -110,7 +110,10 @@ import SwiftUI
     }
     private var unsaved: Unsaved?
     var canRecognize: Bool { consent.allowsTransfer && (accessOverride?() ?? account.planAccessReady) }
-    var busy: Bool { cycle.activeID != nil || manualRefresh != nil }
+    // Image recognition presentation ends with stage one. A manual refresh
+    // retains its operation lock while optional enrichment finishes.
+    var isRecognizingImage: Bool { cycle.activeID != nil }
+    var busy: Bool { isRecognizingImage || manualRefresh != nil }
     var isSynthetic: Bool { previewStart != nil }
     var canContinue: Bool { historyReady && storageError == nil && !deletingHistory && !busy && cycle.canContinue && canRecognize && !showingSettings && selectedPhoto == nil && !photoSelectionActive && !photoLoading }
     var canStartRecognition: Bool {

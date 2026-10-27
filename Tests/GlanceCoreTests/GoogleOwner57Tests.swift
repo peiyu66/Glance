@@ -142,11 +142,11 @@ private actor Ordering57Transport {
 }
 @Test func ordering60ExactMissLeavesTwoRankedSearchSlots() async throws {
     let result = ordering57Result(), transport = Ordering57Transport(onlyCentral: false)
-    #expect(WikipediaReviewCollector.queries(for: result) == ["中央書名", "作者甲", "著者乙"])
+    #expect(WikipediaReviewCollector.queries(for: result) == ["中央書名", "合成別名", "作者甲", "著者乙", "第四主題"])
     let sources = try await WikipediaReviewCollector(transport: { try await transport.fetch($0) }).collect(for: result)
-    #expect(sources.map(\.pageID) == [1,3,2])
+    #expect(sources.map(\.pageID) == [1,3,2,4])
     #expect(Set(await transport.searches) == ["中央書名", "作者甲"])
-    #expect(await transport.extracts == [1,3,2])
+    #expect(await transport.extracts == [1,3,2,4])
 }
 @Test func ordering60SpareSlotsUseVerifiedSearchIndexOrder() async throws {
     let transport = Ordering57Transport(onlyCentral: true)
