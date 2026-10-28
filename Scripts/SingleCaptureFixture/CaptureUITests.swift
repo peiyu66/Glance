@@ -181,15 +181,15 @@ extension CaptureUITests {
             XCTAssertLessThan(timestamp.frame.maxY, refresh.frame.minY)
         }
         XCTAssertEqual(refresh.label, "重新辨識這張圖片")
-        XCTAssertEqual(app.staticTexts["archiveAttempt-1"].label, "整圖辨識第 1 次嘗試")
+        XCTAssertTrue(app.staticTexts["archiveAttempt-1"].label.hasPrefix("第 1 次辨識・"))
         let originalTimestamp = timestamp.label
         refresh.tap()
         scrollWait(app.staticTexts["refresh62-count"], "label == '2:1'")
         let attempt = app.staticTexts["archiveAttempt-1"]
         XCTAssertTrue(attempt.waitForExistence(timeout: 5))
         let secondAttempt = attempt.label
-        XCTAssertTrue(secondAttempt.hasPrefix("整圖辨識第 2 次嘗試・"), secondAttempt)
-        XCTAssertGreaterThan(secondAttempt.count, 18)
+        XCTAssertTrue(secondAttempt.hasPrefix("第 2 次辨識・"), secondAttempt)
+        XCTAssertEqual(secondAttempt, "第 2 次辨識・辨識中…")
         XCTAssertEqual(timestamp.label, originalTimestamp)
         XCTAssertFalse(refresh.isEnabled)
         XCTAssertFalse(app.buttons["continueCapture"].isEnabled)
@@ -198,7 +198,7 @@ extension CaptureUITests {
         XCTAssertTrue(json.isEnabled && share.isEnabled)
         app.buttons["refresh62-first"].tap()
         scrollWait(app.staticTexts["refresh62-count"], "label == '2:2'")
-        XCTAssertEqual(attempt.label, secondAttempt)
+        XCTAssertTrue(attempt.label.hasPrefix("第 2 次辨識・"))
         XCTAssertFalse(refresh.isEnabled)
         XCTAssertFalse(app.buttons["continueCapture"].isEnabled)
         XCTAssertFalse(app.buttons["choosePhoto"].isEnabled)
@@ -218,14 +218,15 @@ extension CaptureUITests {
         XCTAssertEqual(app.buttons["continueCapture"].label, "開始辨識")
         app.buttons["refresh62-second"].tap()
         scrollWait(app.staticTexts["refresh62-busy"], "label == 'idle'")
-        XCTAssertEqual(attempt.label, secondAttempt)
+        XCTAssertTrue(attempt.label.hasPrefix("第 2 次辨識・已完成 ("))
+        XCTAssertTrue(attempt.label.hasSuffix(")"))
         XCTAssertTrue(refresh.isEnabled)
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "refresh62-completed-\(options.isEmpty ? "normal" : "large")"; shot.lifetime = .keepAlways; add(shot)
         refresh.tap(); scrollWait(app.staticTexts["refresh62-count"], "label == '3:2'")
         app.buttons["refresh62-fail"].tap(); scrollWait(app.staticTexts["refresh62-busy"], "label == 'idle'")
         let failedAttempt = attempt.label
-        XCTAssertTrue(failedAttempt.hasPrefix("整圖辨識第 3 次嘗試・"), failedAttempt)
+        XCTAssertTrue(failedAttempt.hasPrefix("第 3 次辨識・"), failedAttempt)
         XCTAssertEqual(timestamp.label, originalTimestamp)
         XCTAssertTrue(app.staticTexts["refreshNotice-1"].label.contains("保留上次成功結果"))
         XCTAssertTrue(app.links["wikipedia-1"].exists && json.isEnabled && share.isEnabled && refresh.isEnabled)
@@ -259,7 +260,8 @@ extension CaptureUITests {
         let app = launch(["--refresh62-ui", "--attempt63-legacy"])
         let attempt = app.staticTexts["archiveAttempt-1"]
         XCTAssertTrue(attempt.waitForExistence(timeout: 15))
-        XCTAssertEqual(attempt.label, "整圖辨識第 2 次嘗試")
+        XCTAssertTrue(attempt.label.hasPrefix("第 2 次辨識・第一階段失敗：合成舊紀錄 ("))
+        XCTAssertTrue(attempt.label.hasSuffix(")"))
         XCTAssertTrue(app.staticTexts["archiveTimestamp-1"].exists)
         XCTAssertTrue(app.staticTexts["refreshNotice-1"].label.contains("保留上次成功結果"))
     }
@@ -2722,7 +2724,7 @@ extension CaptureUITests {
         XCTAssertTrue(action.waitForExistence(timeout: 20))
         scrollWait(action, "enabled == true")
         XCTAssertEqual(action.label, "繼續第二階段")
-        XCTAssertEqual(app.staticTexts["archiveAttempt-1"].label, "整圖辨識第 1 次嘗試")
+        XCTAssertTrue(app.staticTexts["archiveAttempt-1"].label.hasPrefix("第 1 次辨識・"))
         if !options.isEmpty {
             // Real history scrolling collapses the preview, making the large card actions visible.
             let list = historyList(in: app)
@@ -2799,15 +2801,17 @@ extension CaptureUITests {
         checkResume71UI(["--maximum-type", "--dark"])
         let app = XCUIApplication(bundleIdentifier: "local.peiyu.Glance.C2Fixture")
         let whole = app.staticTexts["archiveAttempt-1"], semantic = app.staticTexts["semanticAttempt-1"]
-        XCTAssertEqual(whole.label, "整圖辨識第 1 次嘗試")
-        XCTAssertEqual(semantic.label, "第二階段第 2 次嘗試・已交付傳輸")
+        XCTAssertTrue(whole.label.hasPrefix("第 1 次辨識・已完成 ("))
+        XCTAssertTrue(whole.label.hasSuffix(")"))
+        XCTAssertFalse(whole.label.contains("重試"))
+        XCTAssertFalse(semantic.exists)
         let list = historyList(in: app)
         for _ in 0..<20 {
-            if semantic.isHittable && list.frame.contains(semantic.frame) && list.frame.contains(whole.frame) { break }
+            if whole.isHittable && list.frame.contains(whole.frame) { break }
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.8))
             start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -120)), withVelocity: .slow, thenHoldForDuration: 0.1)
         }
-        XCTAssertTrue(list.frame.contains(whole.frame) && list.frame.contains(semantic.frame))
-        let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.name = "build72-both-counts-maximum"; screenshot.lifetime = .keepAlways; add(screenshot)
+        XCTAssertTrue(list.frame.contains(whole.frame))
+        let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.name = "build73-completed-status-maximum"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
 }

@@ -353,6 +353,47 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
         formatter.dateFormat = "yyyy/MM/dd HH:mm"
         return formatter.string(from: capturedAt)
     }
+    /// Display only: never changes retry eligibility, counters, or saved diagnostics.
+    public func recognitionStatusSummary(timeZone: TimeZone = .autoupdatingCurrent) -> String {
+        let label = "第 \(attemptNumber) 次辨識"
+        func dated(_ text: String, _ date: Date?) -> String {
+            guard let date else { return text }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = timeZone
+            formatter.dateFormat = "yyyy/MM/dd HH:mm"
+            return text + " (" + formatter.string(from: date) + ")"
+        }
+        switch status {
+        case .pending: return label + "・辨識中…"
+        case .failed, .interrupted:
+            let problem = status == .failed ? "第一階段失敗" : "第一階段已中斷"
+            let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return dated(label + "・" + problem + (detail.isEmpty ? "" : "：" + detail), completedAt ?? attempts?.last?.completedAt)
+        case .succeeded: break
+        }
+        guard let review = currentSemanticReview else {
+            return canContinueSemanticReview ? label + "・第二階段未完成" : dated(label + "・已完成", completedAt)
+        }
+        if review.isPending {
+            return label + (review.state == .collecting ? "・第二階段正在尋找資料…" : "・第二階段正在核對資料…")
+        }
+        let completed = review.state == .succeeded && review.source != nil
+            || review.state == .noMatch && review.answer?.decision == .no_match && review.answer?.valid(sources: review.sources) == true
+            || review.state == .insufficientEvidence
+        if completed { return dated(label + "・已完成", review.finishedAt) }
+        let problem: String
+        switch review.state {
+        case .failed: problem = "第二階段失敗"
+        case .cancelled, .interrupted: problem = "第二階段已中斷"
+        default: problem = "第二階段未完成"
+        }
+        // First execution is not a retry. Missing legacy counters remain unknown.
+        let retries = review.runNumber.map { max(1, $0) - 1 } ?? 0
+        let count = retries > 0 ? "・累計重試 \(retries) 次" : ""
+        return dated(label + "・" + problem + count, review.finishedAt)
+    }
     public func retryAttemptSummary(locale: Locale = .autoupdatingCurrent, timeZone: TimeZone = .autoupdatingCurrent) -> String? {
         guard attemptNumber > 1 else { return nil }
         let label = "本圖第 \(attemptNumber) 次辨識"

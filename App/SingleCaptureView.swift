@@ -760,7 +760,7 @@ struct ArchivedRecognitionRow: View {
                     RecognitionSourceThumbnail(snapshot: .init(id: record.id, jpeg: jpeg, allowsImageSharing: record.status == .succeeded), onOpenImage: onOpen)
                 } else { Image(systemName: "photo").frame(width: 64, height: 64).foregroundStyle(.secondary) }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("第 \(record.sequence) 次辨識").font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("archiveRow-\(record.sequence)")
+                    Text("第 \(record.sequence) 張圖片").font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("archiveRow-\(record.sequence)")
                     if record.status == .pending {
                         if isRequestPending && showsPendingProgress {
                             RecognitionPendingBadge()
@@ -865,18 +865,10 @@ struct ArchivedRecognitionRow: View {
             }
             // The visible result may be the previous success while a newer
             // attempt is pending or failed. Its attempt metadata is independent.
-            let attemptSummary = (currentRecord() ?? record).recognitionAttemptSummary
-            Group {
-                Text(attemptSummary).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("archiveAttempt-\(record.sequence)")
-            }
-            if let summary = (currentRecord() ?? record).semanticAttemptSummary {
-                Text(summary).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("semanticAttempt-\(record.sequence)")
-            }
-            if let message = record.message { Text(message).font(.subheadline).foregroundStyle(.secondary) }
+            Text((currentRecord() ?? record).recognitionStatusSummary())
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("archiveAttempt-\(record.sequence)")
             if let refreshNotice { Text(refreshNotice).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("refreshNotice-\(record.sequence)") }
             if let missingImageReason { Text(missingImageReason).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("refreshMissingImage-\(record.sequence)") }
             if record.status == .failed || record.status == .interrupted, let onRetry {
