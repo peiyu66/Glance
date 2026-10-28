@@ -84,3 +84,41 @@ private func resume71Archive() async throws -> (RecognitionArchive, URL, Archive
     let fresh = try await archive.create(id: UUID(), jpeg: Data([7]), capturedAt: Date())
     #expect(fresh.sequence == 1 && fresh.id != base.id)
 }
+
+@Test func resume72HistoryIsBoundedSafeAndSurvivesWholeImageRetry() async throws {
+    let (archive, root, base) = try await resume71Archive(); defer { try? FileManager.default.removeItem(at: root) }
+    var run = UUID()
+    var record = try await archive.beginSemanticReview(id: base.id, attemptID: base.id, runID: run, expectedResult: base.result!)
+    for n in 1...15 {
+        record = try await archive.updateSemanticReview(id: base.id, attemptID: base.id, runID: run, state: .failed,
+            failure: .init(stage: .requestingModel, code: .httpStatus, status: 429))
+        #expect(record.semanticAttemptSummary == "第二階段第 \(n) 次嘗試・尚未送出")
+        let next = UUID()
+        record = try await archive.resumeSemanticReview(id: base.id, attemptID: base.id, runID: next, previousRunID: run, expectedResult: base.result!)
+        run = next
+    }
+    #expect(record.semanticRunHistory?.count == 12)
+    #expect(record.semanticRunHistory?.first?.runNumber == 4)
+    #expect(record.semanticRunHistory?.last?.failure?.status == 429)
+    #expect(record.recognitionAttemptSummary == "整圖辨識第 1 次嘗試")
+    let data = try JSONEncoder().encode(record.semanticRunHistory)
+    let text = String(decoding: data, as: UTF8.self)
+    #expect(!text.contains("rawPayload") && !text.contains("summary") && !text.contains("sources"))
+    _ = try await archive.updateSemanticReview(id: base.id, attemptID: base.id, runID: run, state: .cancelled)
+    let retried = try await archive.beginRetry(id: base.id, attemptID: UUID())
+    #expect(retried.semanticRunHistory?.count == 12 && retried.semanticRunHistory?.last?.runNumber == 16)
+    #expect(retried.semanticAttemptSummary == nil && retried.recognitionAttemptSummary.hasPrefix("整圖辨識第 2 次嘗試"))
+    let decoded = try JSONDecoder().decode(ArchivedRecognition.self, from: JSONEncoder().encode(retried))
+    #expect(decoded.semanticRunHistory == retried.semanticRunHistory)
+    _ = try await archive.complete(id: base.id, result: nil, message: "synthetic", attemptID: retried.currentAttemptID)
+    _ = try await archive.delete(ids: [base.id])
+    #expect(try await archive.load().records.isEmpty)
+}
+
+@Test func resume72MissingLegacyDeliveryIsUnknownRatherThanNotSent() {
+    var review = RecognitionSemanticReview(recordID: UUID(), attemptID: UUID())
+    #expect(review.deliveryEvidence == .unknown)
+    review.requestCaptureVersion = 1
+    #expect(review.deliveryEvidence == .notSent)
+    #expect(RecognitionSemanticRunSummary(review).deliveryEvidence == .notSent)
+}

@@ -20,7 +20,7 @@ inputs.append(root/'Scripts/SingleCaptureFixture/Entity39Checks.swift')
 inputs += [root/'App/BoundedReplayView.swift',root/'Scripts/SingleCaptureFixture/BoundedReplayChecks.swift']
 for p in inputs:shutil.copyfile(p,out/p.name)
 view=out/'SIWCView.swift'
-view.write_text(view.read_text()+'\n'+(out/'AuthRecoveryChecks.swift').read_text())
+view.write_text(view.read_text()+'\n'+(out/'AuthRecoveryChecks.swift').read_text()+'\n'+(root/'Scripts/SingleCaptureFixture/Session72Checks.swift').read_text())
 network_path=out/'SIWCStorageNetwork.swift';network=network_path.read_text()
 a=network.index('enum SIWCKeychain {');b=network.index('/// Fixed reason plus OSStatus',a)
 network=network[:a]+"enum SIWCKeychain { static func load() throws -> SIWCSaved? { nil }; static func save(_ value:SIWCSaved) throws { throw SIWCError.invalidResponse } }\n\n"+network[b:]
@@ -28,7 +28,7 @@ needle='let config = configurationOverride ?? URLSessionConfiguration.ephemeral'
 network=network.replace(needle,needle+'\n        if configurationOverride == nil { config.protocolClasses = ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--bounded-replay-") }) ? [BoundedReplayProtocol.self] : ProcessInfo.processInfo.arguments.contains("--barcode-evidence-checks") ? [BarcodeEvidenceProtocol.self] : [C2BlockedNetwork.self] }')
 network += "\nfinal class C2BlockedNetwork: URLProtocol, @unchecked Sendable { override class func canInit(with request:URLRequest)->Bool { true }; override class func canonicalRequest(for request:URLRequest)->URLRequest { request }; override func startLoading() { C8NetworkProbe.shared.record(); client?.urlProtocol(self,didFailWithError:URLError(.notConnectedToInternet)) }; override func stopLoading() {} }\n"
 network_path.write_text(network)
-(out/'source-hashes.json').write_text(json.dumps({'productionCameraViewSHA256':hashlib.sha256(source.encode()).hexdigest(),'inputs':{str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},'noKeychain':True,'networkBlocked':True},indent=2))
+(out/'source-hashes.json').write_text(json.dumps({'productionCameraViewSHA256':hashlib.sha256(source.encode()).hexdigest(),'inputs':{str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},'session72SHA256':hashlib.sha256((root/'Scripts/SingleCaptureFixture/Session72Checks.swift').read_bytes()).hexdigest(),'noKeychain':True,'networkBlocked':True},indent=2))
 objects=[]
 def add(n,body): objects.append(f'{n:024X} = {{ {body} }};');return f'{n:024X}'
 def ids(values):return '('+','.join(f'{n:024X}' for n in values)+',)'

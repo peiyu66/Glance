@@ -10,11 +10,16 @@ import Observation
     private let beginSignInOverride: (() -> Void)?
     private let authSaveSession: (SIWCSaved) throws -> Void
     private let authLoadSession: () throws -> SIWCSaved?
+    private let reviewHTTPClient: () -> SIWCHTTP
+    private var sessionLocked = false
+    private var sessionWaiters: [CheckedContinuation<Void, Never>] = []
     private var authTraceID: UUID?
     private var authCodeObservation = SIWCAuthCodeObservation()
     init(beginSignIn: (() -> Void)? = nil, dataTransferRevision: @escaping () -> UUID = { DataConsentController.shared.epoch }, allowsDataTransfer: @escaping () -> Bool = { DataConsentController.shared.allowsTransfer }, authHTTPClient: SIWCHTTP = .shared, authSaveSession: @escaping (SIWCSaved) throws -> Void = SIWCKeychain.save,
-         authLoadSession: @escaping () throws -> SIWCSaved? = SIWCKeychain.load) {
+         authLoadSession: @escaping () throws -> SIWCSaved? = SIWCKeychain.load,
+         reviewHTTPClient: @escaping () -> SIWCHTTP = { SIWCHTTP() }) {
         self.dataTransferRevision = dataTransferRevision; self.beginSignInOverride = beginSignIn; self.allowsDataTransfer = allowsDataTransfer; self.authHTTPClient = authHTTPClient; self.authSaveSession = authSaveSession; self.authLoadSession = authLoadSession
+        self.reviewHTTPClient = reviewHTTPClient
         super.init()
     }
     private var authStage: SIWCAuthStage = .storage
@@ -233,15 +238,29 @@ import Observation
     func foreground() {
         if let pending = currentPending, pending.deadline <= Date() { authRecord(.callback, .failed, category: .timeout); status = "登入嘗試已逾時，請重新開始。"; endAttempt() }
     }
-    private func usableTokens() async throws -> SIWCTokens {
+    private func usableTokens(validate: @escaping () throws -> Void) async throws -> SIWCTokens {
+        let identity = recognitionAccountIdentity
+        if sessionLocked { await withCheckedContinuation { sessionWaiters.append($0) } }
+        else { sessionLocked = true }
+        defer {
+            if sessionWaiters.isEmpty { sessionLocked = false }
+            else { sessionWaiters.removeFirst().resume() }
+        }
+        let validateSession = { [self] in
+            try Task.checkCancellation(); try validate()
+            guard recognitionAccountIdentity == identity else { throw CancellationError() }
+        }
+        try validateSession()
         guard let account, account.tokens != nil else { throw SIWCError.invalidIdentity }
         do {
-            return try await SIWCExistingGrantSession.usable(account:account) { replacement in
+            return try await SIWCExistingGrantSession.usable(account:account, http: authHTTPClient, validate: validateSession) { replacement in
                 guard var next = self.saved, let index = next.accounts.firstIndex(where: { $0.id == account.id }) else { throw SIWCError.invalidIdentity }
                 next.accounts[index].tokens = replacement
-                try SIWCKeychain.save(next); self.saved = next; self.refreshCount += 1
+                try validateSession()
+                try self.authSaveSession(next); self.saved = next; self.refreshCount += 1
             }
         } catch let error as SIWCHTTPError where error.terminalRefresh {
+            try validateSession()
             try clearTokens(accountID: account.id); throw error
         }
     }
@@ -258,7 +277,7 @@ import Observation
         busy = true; defer { busy = false }
         SIWCHTTP.shared.prepareCameraRequest(requestID)
         do {
-            let tokens = try await usableTokens()
+            let tokens = try await usableTokens(validate: validateBeforeImageSend)
             guard SIWCProtocol.hasPlan(tokens.scope) else { throw SIWCError.planDisabled }
             if catalog.isEmpty {
                 let data = try await SIWCHTTP.shared.data(url: SIWCProtocol.resource + "/models", bearer: tokens.access)
@@ -277,7 +296,7 @@ import Observation
         } catch { SIWCHTTP.shared.recordFailure(error); throw error }
     }
     /// Text-only optional enrichment uses an independent transport and the current
-    /// already-usable session. It never races a rotating refresh token or starts auth.
+    /// existing-grant session path, serialized with image recognition. It never starts auth.
     var recognitionAccountIdentity: String { selectedID + ":" + (account?.authenticationTraceID?.uuidString ?? "none") }
     func reviewWikipedia(input: Data, validate: @escaping () throws -> Void,
                          willSend: @escaping () async throws -> Void, transportStarted: @escaping () throws -> Void) async throws -> String {
@@ -288,12 +307,19 @@ import Observation
                   planAccessReady else { throw CancellationError() }
         }
         try validateRequest()
-        guard !busy, let tokens = account?.tokens, tokens.expiresAt > Date().addingTimeInterval(60), SIWCProtocol.hasPlan(tokens.scope) else { throw SIWCError.planDisabled }
+        let tokens = try await usableTokens(validate: validateRequest)
+        try validateRequest()
+        guard SIWCProtocol.hasPlan(tokens.scope) else { throw SIWCError.planDisabled }
+        let client = reviewHTTPClient()
+        defer { client.cancelRequests() }
+        if catalog.isEmpty {
+            let data = try await client.data(url: SIWCProtocol.resource + "/models", bearer: tokens.access)
+            try validateRequest()
+            catalog = try JSONDecoder().decode(SIWCCatalog.self, from: data).models.filter { $0.visibility == "list" }
+        }
         let body = try WikipediaSemanticReview.request(input: input, catalog: catalog)
         try await willSend()
         try validateRequest()
-        let client = SIWCHTTP()
-        defer { client.cancelRequests() }
         return try await withTaskCancellationHandler {
             let answer = try await client.stream(body: body, bearer: tokens.access, operation: "wikipedia-text-review", validateBeforeImageSend: validateRequest, transportStarted: transportStarted)
             try validateRequest()

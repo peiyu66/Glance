@@ -2,7 +2,7 @@ import SwiftUI
 
 @MainActor
 func runResume71Checks() async -> [String: Bool] {
-    var checks: [String: Bool] = [:]
+    var checks: [String: Bool] = await SIWCController.runSession72Checks()
     func host(_ suffix: String, _ probe: Semantic45Probe) async -> C2FixtureHost {
         let h = C2FixtureHost(name: "resume71-" + suffix)
         try? FileManager.default.removeItem(at: h.root)
@@ -167,6 +167,61 @@ func runResume71Checks() async -> [String: Bool] {
         } else { checks["no_match_created"] = false }
         h.model.closePreview()
     }
+    // Build72 injected failures; no transport or credential access.
+    for mode in ["offline", "timeout", "transport-cancel", "http429", "http503", "invalid-reply", "cancel", "plan"] {
+        let p = Semantic45Probe(), h = await host("investigate-" + mode, Semantic45Probe())
+        h.model = h.makeModel(semantic: p); await h.model.bootstrap()
+        if let id = await h.recognize45(p) {
+            await h.settle { p.waits[id] != nil }
+            let waiter = p.waits.removeValue(forKey: id)
+            switch mode {
+            case "offline": waiter?.resume(throwing: URLError(.notConnectedToInternet))
+            case "timeout": waiter?.resume(throwing: URLError(.timedOut))
+            case "transport-cancel": waiter?.resume(throwing: URLError(.cancelled))
+            case "http429", "http503": waiter?.resume(throwing: SIWCHTTPError(status: mode == "http429" ? 429 : 503, code: "synthetic", requestID: nil, parameter: nil, bodyShape: "error-object"))
+            case "invalid-reply": waiter?.resume(returning: "{malformed}")
+            case "cancel": waiter?.resume(throwing: CancellationError())
+            default: waiter?.resume(throwing: SIWCError.planDisabled)
+            }
+            await h.settle { h.model.records.first?.semanticReview?.isPending == false && !h.model.busy }
+            let rec = h.model.records.first!, review = rec.semanticReview!
+            checks["investigate_" + mode + "_continuable"] = rec.canContinueSemanticReview && h.model.canContinueSecondStage(rec)
+            if mode == "cancel" {
+                checks["investigate_cancel_state"] = review.state == .cancelled && review.failure == nil
+            } else if ["offline", "timeout", "transport-cancel"].contains(mode) {
+                let status = mode == "offline" ? -1009 : mode == "timeout" ? -1001 : -999
+                checks["investigate_" + mode + "_classification"] = review.state == .failed && review.failure?.code == .network && review.failure?.status == status
+            } else if mode == "invalid-reply" {
+                checks["investigate_invalid_reply_classification"] = review.failure?.stage == .parsingReply && review.failure?.code == .invalidModelReply && review.modelResponse?.rawResponse == "{malformed}"
+            } else if mode.hasPrefix("http") {
+                checks["http_status_preserved_" + mode] = review.failure?.code == .httpStatus && review.failure?.status == (mode == "http429" ? 429 : 503)
+            } else {
+                checks["investigate_" + mode + "_session_classification"] = review.failure?.stage == .requestingModel && review.failure?.code == .sessionUnavailable && review.failure?.status == nil
+            }
+            checks["investigate_" + mode + "_submitted"] = review.modelRequest?.delivery == .submitted
+            checks["investigate_" + mode + "_resume"] = h.model.continueSecondStage(id: id)
+            await h.settle { p.waits[id] != nil }
+            checks["investigate_" + mode + "_old_failure_replaced"] = h.model.records.first?.semanticReview?.generation == 2 && h.model.records.first?.semanticReview?.failure == nil
+            checks["history_retained_" + mode] = h.model.records.first?.semanticRunHistory?.last == RecognitionSemanticRunSummary(review)
+            p.finish(id); await h.settle { h.model.records.first?.semanticReview?.isPending == false && !h.model.busy }
+            checks["investigate_" + mode + "_recovery"] = h.model.records.first?.semanticReview?.state == .succeeded && h.calls == 1 && p.calls == 2 && p.sourceCalls == 2
+        } else { checks["investigate_" + mode + "_created"] = false }
+        h.model.closePreview()
+    }
+    for empty in [true, false] {
+        let p = Semantic45Probe(); p.emptySources = empty
+        if !empty { p.sourceFailure = .init(stage: .sourceSearch, code: .network, status: -1001) }
+        let h = await host(empty ? "investigate-empty" : "investigate-source-timeout", p)
+        if let _ = await h.recognize45(p) {
+            await h.settle { h.model.records.first?.semanticReview?.isPending == false && !h.model.busy }
+            let rec = h.model.records.first!
+            checks[empty ? "investigate_empty_terminal" : "investigate_source_timeout_continuable"] = empty
+                ? rec.semanticReview?.state == .insufficientEvidence && !rec.canContinueSemanticReview
+                : rec.semanticReview?.state == .failed && rec.canContinueSemanticReview && rec.semanticReview?.failure?.status == -1001
+            checks[empty ? "investigate_empty_no_model" : "investigate_source_timeout_no_model"] = p.calls == 0
+        } else { checks["investigate_source_case_created"] = false }
+        h.model.closePreview()
+    }
     return checks
 }
 
@@ -178,6 +233,7 @@ struct Resume71ChecksView: View {
             let passed = checks.values.allSatisfy { $0 }
             status = passed ? "passed \(checks.count)" : "FAILED " + checks.filter { !$0.value }.keys.sorted().joined(separator: ",")
             let receipt: [String: Any] = ["passed": passed, "checks": checks, "realModelRequests": 0, "networkAttempts": C8NetworkProbe.shared.count]
+            print("BUILD72_RECEIPT " + String(decoding: (try? JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])) ?? Data(), as: UTF8.self))
             let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("resume71-checks.json")
             try? JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys]).write(to: url)
         }

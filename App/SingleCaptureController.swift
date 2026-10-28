@@ -1033,7 +1033,12 @@ import SwiftUI
                     status = "第二階段尚未開始，請稍後再試。"
                     return
                 }
-                let failure = SemanticReviewFailure.capture(error, stage: failureStage)
+                let failure: SemanticReviewFailure
+                if let http = error as? SIWCHTTPError {
+                    failure = .init(stage: failureStage, code: .httpStatus, status: http.status)
+                } else if error is SIWCExistingGrantSession.Failure || error as? SIWCError == .planDisabled || error as? SIWCError == .invalidIdentity {
+                    failure = .init(stage: failureStage, code: .sessionUnavailable)
+                } else { failure = SemanticReviewFailure.capture(error, stage: failureStage) }
                 if let saved = try? await archive.updateSemanticReview(id: id, attemptID: attempt, runID: runID, state: .failed, response: response, failure: failure) {
                     if (try? validate()) != nil { replace(saved) }
                 } else if (try? validate()) != nil, var current = records.first(where: { $0.id == id }), current.semanticReview == nil || current.semanticReview?.runID == runID {

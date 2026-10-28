@@ -144,6 +144,18 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
     public var wikipediaDiagnostics: [WikipediaDiagnostic]? = nil
     public var modelResponses: [RecognitionModelResponse]? = nil
     public var semanticReview: RecognitionSemanticReview? = nil
+    public var semanticRunHistory: [RecognitionSemanticRunSummary]? = nil
+    mutating func retainSemanticRun() {
+        guard let review = semanticReview else { return }
+        semanticRunHistory = Array(((semanticRunHistory ?? []).filter { $0.runID != review.runID } + [.init(review)]).suffix(12))
+    }
+    public var recognitionAttemptSummary: String {
+        retryAttemptSummary()?.replacingOccurrences(of: "本圖第", with: "整圖辨識第").replacingOccurrences(of: "次辨識", with: "次嘗試") ?? "整圖辨識第 \(attemptNumber) 次嘗試"
+    }
+    public var semanticAttemptSummary: String? {
+        guard let review = semanticReview else { return nil }
+        return "第二階段第 \(review.generation) 次嘗試・" + review.deliveryEvidence.label
+    }
     public var productBarcodes: [ProductBarcode]? = nil
     public var productFacts: ProductFacts? = nil
     /// Absent on legacy cards; never reconstructed from an untyped payload.
@@ -357,7 +369,7 @@ public struct ArchivedRecognition: Codable, Equatable, Identifiable, Sendable {
 extension ArchivedRecognition {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, id, sequence, capturedAt, imageSHA256, imageByteCount
-        case status, result, message, completedAt, decodedBarcodes, wikipedia, textWikipedia, wikipediaDiagnostics, modelResponses, semanticReview, productBarcodes, productFacts, barcodeDiagnostics, attempts, imageSource, retainedSuccess
+        case status, result, message, completedAt, decodedBarcodes, wikipedia, textWikipedia, wikipediaDiagnostics, modelResponses, semanticReview, semanticRunHistory, productBarcodes, productFacts, barcodeDiagnostics, attempts, imageSource, retainedSuccess
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -376,6 +388,7 @@ extension ArchivedRecognition {
         wikipediaDiagnostics = (try? c.decodeIfPresent([WikipediaDiagnostic].self, forKey: .wikipediaDiagnostics)).map { Array($0.prefix(64)) }
         modelResponses = (try? c.decodeIfPresent([RecognitionModelResponse].self, forKey: .modelResponses)).map { values in Array(values.filter { $0.valid && $0.sourceImageID == id }.suffix(3)) }
         semanticReview = try? c.decodeIfPresent(RecognitionSemanticReview.self, forKey: .semanticReview)
+        semanticRunHistory = (try? c.decodeIfPresent([RecognitionSemanticRunSummary].self, forKey: .semanticRunHistory)).map { Array($0.suffix(12)) }
         textWikipedia = try? c.decodeIfPresent([TextWikipediaReference].self, forKey: .textWikipedia)
         productBarcodes = try? c.decodeIfPresent([ProductBarcode].self, forKey: .productBarcodes)
         productFacts = try? c.decodeIfPresent(ProductFacts.self, forKey: .productFacts)
@@ -525,6 +538,7 @@ public actor RecognitionArchive {
                 wikipedia: record.wikipedia, textWikipedia: record.textWikipedia, wikipediaDiagnostics: record.wikipediaDiagnostics,
                 semanticReview: record.semanticReview, modelResponses: record.modelResponses)
         }
+        record.retainSemanticRun()
         record.attempts?.append(.init(id: attemptID, startedAt: date, outcome: .pending))
         record.status = .pending; record.result = nil; record.message = nil; record.completedAt = nil
         record.wikipedia = nil; record.textWikipedia = nil; record.wikipediaDiagnostics = nil; record.semanticReview = nil
@@ -606,6 +620,7 @@ public actor RecognitionArchive {
         } else { guard record.semanticReview == nil else { throw Failure.invalidCompletion } }
         let previousGeneration = record.semanticReview?.generation ?? 0
         guard previousGeneration < Int.max else { throw Failure.invalidCompletion }
+        record.retainSemanticRun()
         record.semanticReview = .init(recordID: id, attemptID: attemptID, runID: runID)
         record.semanticReview?.runNumber = previousGeneration + 1
         record.semanticReview?.requestCaptureVersion = 1

@@ -865,10 +865,16 @@ struct ArchivedRecognitionRow: View {
             }
             // The visible result may be the previous success while a newer
             // attempt is pending or failed. Its attempt metadata is independent.
-            if let attemptSummary = (currentRecord() ?? record).retryAttemptSummary() {
+            let attemptSummary = (currentRecord() ?? record).recognitionAttemptSummary
+            Group {
                 Text(attemptSummary).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("archiveAttempt-\(record.sequence)")
+            }
+            if let summary = (currentRecord() ?? record).semanticAttemptSummary {
+                Text(summary).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("semanticAttempt-\(record.sequence)")
             }
             if let message = record.message { Text(message).font(.subheadline).foregroundStyle(.secondary) }
             if let refreshNotice { Text(refreshNotice).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("refreshNotice-\(record.sequence)") }

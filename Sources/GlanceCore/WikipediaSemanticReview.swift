@@ -251,7 +251,7 @@ public struct SemanticReviewFailure: Codable, Equatable, Sendable, Error {
     }
     public enum Code: String, Codable, Sendable {
         case network, httpStatus, redirected, oversizedResponse, invalidJSON, apiError, apiWarning, invalidEnvelope
-        case capacity, storage, modelRequest, invalidModelReply, unknown
+        case capacity, storage, modelRequest, invalidModelReply, sessionUnavailable, unknown
     }
     public let stage: Stage
     public let code: Code
@@ -832,6 +832,21 @@ public struct RecognitionSemanticReview: Codable, Equatable, Sendable {
     /// Absent on old archives; those runs are generation one.
     public var runNumber: Int? = nil
     public var generation: Int { max(1, runNumber ?? 1) }
+    public enum DeliveryEvidence: String, Codable, Sendable {
+        case notSent, unknown, handedToTransport
+        public var label: String {
+            switch self {
+            case .notSent: "尚未送出"
+            case .unknown: "送出狀態未確認"
+            case .handedToTransport: "已交付傳輸"
+            }
+        }
+    }
+    public var deliveryEvidence: DeliveryEvidence {
+        if modelRequest?.delivery == .submitted { return .handedToTransport }
+        if modelRequest?.delivery == .dispatching { return .unknown }
+        return requestCaptureVersion == 1 || modelRequest?.delivery == .prepared ? .notSent : .unknown
+    }
     public var isPending: Bool { state == .collecting || state == .reviewing }
     public var source: WikipediaReviewSource? {
         guard state == .succeeded, let answer, answer.decision == .selected, answer.valid(sources: sources) else { return nil }
@@ -857,5 +872,27 @@ public struct RecognitionSemanticReview: Codable, Equatable, Sendable {
     }
     public init(recordID: UUID, attemptID: UUID, runID: UUID = UUID(), at date: Date = Date()) {
         self.recordID = recordID; self.attemptID = attemptID; self.runID = runID; self.startedAt = date; self.state = .collecting
+    }
+}
+
+/// Bounded historical metadata only; no input, response, source text or credentials.
+public struct RecognitionSemanticRunSummary: Codable, Equatable, Sendable {
+    public let phase: SemanticReviewFailure.Stage
+    public let runID: UUID
+    public let attemptID: UUID
+    public let runNumber: Int
+    public let startedAt: Date
+    public let finishedAt: Date?
+    public let state: RecognitionSemanticReview.State
+    public let delivery: RecognitionModelRequest.Delivery?
+    public let deliveryEvidence: RecognitionSemanticReview.DeliveryEvidence
+    public let failure: SemanticReviewFailure?
+    public let stopReason: RecognitionStopReason?
+    public init(_ review: RecognitionSemanticReview) {
+        phase = review.failure?.stage ?? ([.succeeded, .noMatch, .insufficientEvidence].contains(review.state) ? .savingResult : review.sourcesFinishedAt == nil ? .collecting : review.modelRequest == nil ? .preparingRequest : .requestingModel)
+        runID = review.runID; attemptID = review.attemptID; runNumber = review.generation
+        startedAt = review.startedAt; finishedAt = review.finishedAt; state = review.state
+        delivery = review.modelRequest?.delivery; deliveryEvidence = review.deliveryEvidence
+        failure = review.failure; stopReason = review.stopReason
     }
 }

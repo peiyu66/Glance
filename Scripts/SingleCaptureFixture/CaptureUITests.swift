@@ -181,14 +181,14 @@ extension CaptureUITests {
             XCTAssertLessThan(timestamp.frame.maxY, refresh.frame.minY)
         }
         XCTAssertEqual(refresh.label, "重新辨識這張圖片")
-        XCTAssertFalse(app.staticTexts["archiveAttempt-1"].exists)
+        XCTAssertEqual(app.staticTexts["archiveAttempt-1"].label, "整圖辨識第 1 次嘗試")
         let originalTimestamp = timestamp.label
         refresh.tap()
         scrollWait(app.staticTexts["refresh62-count"], "label == '2:1'")
         let attempt = app.staticTexts["archiveAttempt-1"]
         XCTAssertTrue(attempt.waitForExistence(timeout: 5))
         let secondAttempt = attempt.label
-        XCTAssertTrue(secondAttempt.hasPrefix("本圖第 2 次辨識・"), secondAttempt)
+        XCTAssertTrue(secondAttempt.hasPrefix("整圖辨識第 2 次嘗試・"), secondAttempt)
         XCTAssertGreaterThan(secondAttempt.count, 18)
         XCTAssertEqual(timestamp.label, originalTimestamp)
         XCTAssertFalse(refresh.isEnabled)
@@ -225,7 +225,7 @@ extension CaptureUITests {
         refresh.tap(); scrollWait(app.staticTexts["refresh62-count"], "label == '3:2'")
         app.buttons["refresh62-fail"].tap(); scrollWait(app.staticTexts["refresh62-busy"], "label == 'idle'")
         let failedAttempt = attempt.label
-        XCTAssertTrue(failedAttempt.hasPrefix("本圖第 3 次辨識・"), failedAttempt)
+        XCTAssertTrue(failedAttempt.hasPrefix("整圖辨識第 3 次嘗試・"), failedAttempt)
         XCTAssertEqual(timestamp.label, originalTimestamp)
         XCTAssertTrue(app.staticTexts["refreshNotice-1"].label.contains("保留上次成功結果"))
         XCTAssertTrue(app.links["wikipedia-1"].exists && json.isEnabled && share.isEnabled && refresh.isEnabled)
@@ -259,7 +259,7 @@ extension CaptureUITests {
         let app = launch(["--refresh62-ui", "--attempt63-legacy"])
         let attempt = app.staticTexts["archiveAttempt-1"]
         XCTAssertTrue(attempt.waitForExistence(timeout: 15))
-        XCTAssertEqual(attempt.label, "本圖第 2 次辨識")
+        XCTAssertEqual(attempt.label, "整圖辨識第 2 次嘗試")
         XCTAssertTrue(app.staticTexts["archiveTimestamp-1"].exists)
         XCTAssertTrue(app.staticTexts["refreshNotice-1"].label.contains("保留上次成功結果"))
     }
@@ -2722,9 +2722,12 @@ extension CaptureUITests {
         XCTAssertTrue(action.waitForExistence(timeout: 20))
         scrollWait(action, "enabled == true")
         XCTAssertEqual(action.label, "繼續第二階段")
+        XCTAssertEqual(app.staticTexts["archiveAttempt-1"].label, "整圖辨識第 1 次嘗試")
         if !options.isEmpty {
             // Real history scrolling collapses the preview, making the large card actions visible.
-            for _ in 0..<3 where !action.isHittable { historyList(in: app).swipeUp() }
+            let list = historyList(in: app)
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -25)), withVelocity: .slow, thenHoldForDuration: 0.2)
         }
         XCTAssertTrue(action.isHittable)
         XCTAssertTrue(app.frame.contains(action.frame), "Action must be visible in the captured viewport")
@@ -2788,5 +2791,23 @@ extension CaptureUITests {
         action.tap(); scrollWait(app.staticTexts["resume71-counts"], "label == 'stage1=1 stage2=2'")
         app.buttons["resume71-finish"].tap(); scrollWait(action, "enabled == true")
         XCTAssertEqual(action.label, "重新辨識這張圖片")
+    }
+}
+
+extension CaptureUITests {
+    func testBuild72BothCountsAtMaximumType() {
+        checkResume71UI(["--maximum-type", "--dark"])
+        let app = XCUIApplication(bundleIdentifier: "local.peiyu.Glance.C2Fixture")
+        let whole = app.staticTexts["archiveAttempt-1"], semantic = app.staticTexts["semanticAttempt-1"]
+        XCTAssertEqual(whole.label, "整圖辨識第 1 次嘗試")
+        XCTAssertEqual(semantic.label, "第二階段第 2 次嘗試・已交付傳輸")
+        let list = historyList(in: app)
+        for _ in 0..<20 {
+            if semantic.isHittable && list.frame.contains(semantic.frame) && list.frame.contains(whole.frame) { break }
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.8))
+            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -120)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        XCTAssertTrue(list.frame.contains(whole.frame) && list.frame.contains(semantic.frame))
+        let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.name = "build72-both-counts-maximum"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
 }
